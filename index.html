@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>家庭行事曆與生活相簿</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" />
+  <link rel="stylesheet" href="./style.css" />
+  <script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+</head>
+<body>
+  <!-- 頂部非阻塞 Toast 容器 -->
+  <div id="toast-container" class="toast-container" aria-live="polite"></div>
+
+  <!-- 初始載入畫面 -->
+  <div id="screen-loading" class="fullscreen-state">
+    <div class="spinner"></div>
+    <p id="loading-text">正在連線 LINE 驗證身分...</p>
+  </div>
+
+  <!-- 待審核畫面 -->
+  <div id="screen-pending" class="fullscreen-state hidden">
+    <div class="state-card">
+      <div class="state-icon pending"><i class="fa-solid fa-user-clock"></i></div>
+      <h2>帳號等待核准中</h2>
+      <p id="pending-desc">你的 LINE 帳號已自動登記，請通知管理員至 Google 試算表將你的權限改為 <strong>active</strong>。</p>
+      <div class="pending-user-box">
+        <img id="pending-avatar" class="avatar-sm hidden" alt="頭像" />
+        <span id="pending-name"></span>
+      </div>
+      <button id="btn-retry-auth" class="btn btn-primary" type="button">
+        <i class="fa-solid fa-rotate-right"></i> 重新檢查權限
+      </button>
+    </div>
+  </div>
+
+  <!-- 錯誤畫面 -->
+  <div id="screen-error" class="fullscreen-state hidden">
+    <div class="state-card">
+      <div class="state-icon error"><i class="fa-solid fa-triangle-exclamation"></i></div>
+      <h2>無法載入系統</h2>
+      <p id="error-desc">連線發生異常，請稍後再試。</p>
+      <button id="btn-reload-app" class="btn btn-outline" type="button">
+        <i class="fa-solid fa-rotate-right"></i> 重新整理
+      </button>
+    </div>
+  </div>
+
+  <!-- 主應用程式介面 -->
+  <div id="app-shell" class="app-shell hidden">
+    <!-- 頂部列 -->
+    <header class="app-header">
+      <div class="header-title">
+        <i id="header-icon" class="fa-regular fa-calendar-days"></i>
+        <h1 id="header-text">家庭行事曆</h1>
+      </div>
+      <button id="btn-profile" class="profile-chip" type="button" title="修改顯示暱稱">
+        <img id="my-avatar" class="avatar-xs hidden" alt="頭像" />
+        <i id="my-avatar-fallback" class="fa-solid fa-circle-user"></i>
+        <span id="my-name">成員</span>
+        <i class="fa-solid fa-pen fa-2xs muted"></i>
+      </button>
+    </header>
+
+    <!-- 分頁 1：行事曆 -->
+    <main id="view-calendar" class="view-pane">
+      <section class="calendar-card">
+        <div class="cal-toolbar">
+          <div class="cal-nav">
+            <button id="btn-prev-month" class="icon-btn" type="button" aria-label="上個月">
+              <i class="fa-solid fa-chevron-left"></i>
+            </button>
+            <h2 id="cal-month-label">2026 年 11 月</h2>
+            <button id="btn-next-month" class="icon-btn" type="button" aria-label="下個月">
+              <i class="fa-solid fa-chevron-right"></i>
+            </button>
+          </div>
+          <button id="btn-today" class="btn btn-outline btn-sm" type="button">今天</button>
+        </div>
+
+        <div class="cal-weekdays">
+          <span class="sun">日</span><span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span class="sat">六</span>
+        </div>
+
+        <div id="cal-grid" class="cal-grid"></div>
+      </section>
+
+      <!-- 選中日期的行程與當日相簿縮圖 -->
+      <section class="day-panel">
+        <div class="day-panel-header">
+          <div>
+            <h3 id="selected-date-label">2026-11-21</h3>
+            <span id="selected-date-sub" class="sub-text"></span>
+          </div>
+          <button id="btn-add-event-inline" class="btn btn-outline btn-sm" type="button">
+            <i class="fa-solid fa-plus"></i> 新增行程
+          </button>
+        </div>
+
+        <div id="day-events-list" class="event-list"></div>
+
+        <!-- 當日生活相簿輕量關聯縮圖條 -->
+        <div id="day-photos-section" class="day-photos-box hidden">
+          <div class="day-photos-header">
+            <span><i class="fa-solid fa-camera"></i> 當日生活相簿</span>
+            <button id="btn-view-day-album" class="link-btn" type="button">
+              在相簿查看 <i class="fa-solid fa-arrow-right"></i>
+            </button>
+          </div>
+          <div id="day-thumbs-strip" class="thumb-strip"></div>
+        </div>
+      </section>
+
+      <!-- 右下角浮動新增按鈕 -->
+      <button id="fab-add-event" class="fab" type="button" aria-label="新增行程">
+        <i class="fa-solid fa-plus"></i>
+      </button>
+    </main>
+
+    <!-- 分頁 2：生活相簿 -->
+    <main id="view-album" class="view-pane hidden">
+      <div class="album-tip-banner">
+        <i class="fa-brands fa-line"></i>
+        <span>直接將照片或 50 MB 內短影片傳給官方帳號，就會自動收錄到這裡。</span>
+      </div>
+
+      <!-- 篩選狀態列（從行事曆點擊關聯進入時顯示） -->
+      <div id="album-filter-bar" class="filter-bar hidden">
+        <span id="album-filter-label"></span>
+        <button id="btn-clear-filter" class="btn btn-outline btn-xs" type="button">
+          <i class="fa-solid fa-xmark"></i> 顯示全部
+        </button>
+      </div>
+
+      <div id="album-list" class="album-list"></div>
+
+      <div id="album-load-more-wrap" class="load-more-wrap hidden">
+        <button id="btn-load-more" class="btn btn-outline" type="button">
+          <i class="fa-solid fa-angles-down"></i> 載入更多回憶
+        </button>
+      </div>
+    </main>
+
+    <!-- 底部雙分頁導覽列 -->
+    <nav class="bottom-nav">
+      <button class="nav-item active" data-tab="calendar" type="button">
+        <i class="fa-regular fa-calendar-days"></i>
+        <span>行事曆</span>
+      </button>
+      <button class="nav-item" data-tab="album" type="button">
+        <i class="fa-regular fa-images"></i>
+        <span>生活相簿</span>
+      </button>
+    </nav>
+  </div>
+
+  <!-- 彈窗 1：新增 / 編輯行程 -->
+  <div id="modal-event" class="modal-backdrop hidden" role="dialog" aria-modal="true">
+    <div class="modal-sheet">
+      <div class="modal-header">
+        <h3 id="modal-event-title">新增行程</h3>
+        <button class="icon-btn modal-close" data-close="modal-event" type="button" aria-label="關閉">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+      </div>
+      <form id="form-event" class="modal-body">
+        <input type="hidden" id="ev-id" />
+
+        <div class="form-group">
+          <label for="ev-title">標題 <span class="req">*</span></label>
+          <input id="ev-title" type="text" maxlength="80" placeholder="例如：帶狗狗打預防針、週末去台中" required />
+        </div>
+
+        <div class="form-group">
+          <label>標籤</label>
+          <div id="ev-tag-chips" class="tag-chips"></div>
+          <input id="ev-tag-custom" type="text" maxlength="20" placeholder="或自行輸入標籤名稱" />
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label for="ev-start-date">開始日期 <span class="req">*</span></label>
+            <input id="ev-start-date" type="date" required />
+          </div>
+          <div class="form-group">
+            <label for="ev-end-date">結束日期</label>
+            <input id="ev-end-date" type="date" />
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label for="ev-start-time">時間（選填，留空為全天）</label>
+          <input id="ev-start-time" type="time" />
+        </div>
+
+        <div class="form-group">
+          <label for="ev-content">內容（支援換行）</label>
+          <textarea id="ev-content" rows="5" placeholder="可記錄地點、預約時間、注意事項..."></textarea>
+        </div>
+
+        <div id="ev-meta-info" class="meta-info hidden"></div>
+
+        <div class="modal-footer">
+          <button id="btn-delete-event" class="btn btn-danger-outline hidden" type="button">
+            <i class="fa-regular fa-trash-can"></i> 刪除
+          </button>
+          <div class="footer-right">
+            <button class="btn btn-outline modal-close" data-close="modal-event" type="button">取消</button>
+            <button id="btn-save-event" class="btn btn-primary" type="submit">
+              <i class="fa-solid fa-check"></i> 儲存
+            </button>
+          </div>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- 彈窗 2：編輯相簿貼文（日期、說明、關聯行程、單檔刪除） -->
+  <div id="modal-post" class="modal-backdrop hidden" role="dialog" aria-modal="true">
+    <div class="modal-sheet">
+      <div class="modal-header">
+        <h3>編輯生活相簿</h3>
+        <button class="icon-btn modal-close" data-close="modal-post" type="button" aria-label="關閉">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+      </div>
+      <form id="form-post" class="modal-body">
+        <input type="hidden" id="post-id" />
+
+        <div class="form-group">
+          <label for="post-date">日記日期 <span class="req">*</span></label>
+          <input id="post-date" type="date" required />
+        </div>
+
+        <div class="form-group">
+          <label for="post-linked-event">關聯行事曆行程（前後 14 天）</label>
+          <select id="post-linked-event">
+            <option value="">不關聯行程</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label for="post-caption">文字說明（支援換行）</label>
+          <textarea id="post-caption" rows="4" placeholder="寫下今天發生的趣事或拍攝地點..."></textarea>
+        </div>
+
+        <div class="form-group">
+          <label>已收錄照片 / 影片（點擊垃圾桶可單獨移除）</label>
+          <div id="post-edit-media-grid" class="edit-media-grid"></div>
+        </div>
+
+        <div class="modal-footer">
+          <button id="btn-delete-post" class="btn btn-danger-outline" type="button">
+            <i class="fa-regular fa-trash-can"></i> 刪除整篇
+          </button>
+          <div class="footer-right">
+            <button class="btn btn-outline modal-close" data-close="modal-post" type="button">取消</button>
+            <button id="btn-save-post" class="btn btn-primary" type="submit">
+              <i class="fa-solid fa-check"></i> 儲存
+            </button>
+          </div>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- 彈窗 3：修改自己的暱稱 -->
+  <div id="modal-profile" class="modal-backdrop hidden" role="dialog" aria-modal="true">
+    <div class="modal-sheet modal-sm">
+      <div class="modal-header">
+        <h3>修改顯示暱稱</h3>
+        <button class="icon-btn modal-close" data-close="modal-profile" type="button" aria-label="關閉">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+      </div>
+      <form id="form-profile" class="modal-body">
+        <div class="form-group">
+          <label for="profile-name-input">暱稱</label>
+          <input id="profile-name-input" type="text" maxlength="20" required />
+        </div>
+        <div class="modal-footer">
+          <div></div>
+          <div class="footer-right">
+            <button class="btn btn-outline modal-close" data-close="modal-profile" type="button">取消</button>
+            <button id="btn-save-profile" class="btn btn-primary" type="submit">儲存</button>
+          </div>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- 彈窗 4：大圖燈箱預覽（點擊再開 Drive 原圖） -->
+  <div id="modal-lightbox" class="lightbox-backdrop hidden" role="dialog" aria-modal="true">
+    <div class="lightbox-topbar">
+      <span id="lightbox-info">照片預覽</span>
+      <button id="btn-close-lightbox" class="lightbox-close" type="button" aria-label="關閉預覽">
+        <i class="fa-solid fa-xmark"></i>
+      </button>
+    </div>
+    <div class="lightbox-stage">
+      <div id="lightbox-spinner" class="spinner light"></div>
+      <img id="lightbox-img" class="hidden" alt="相簿大圖預覽" />
+    </div>
+    <div class="lightbox-footer">
+      <button id="btn-open-original" class="btn btn-outline" type="button">
+        <i class="fa-solid fa-arrow-up-right-from-square"></i> 開啟 Google 雲端原檔
+      </button>
+    </div>
+  </div>
+
+  <!-- 彈窗 5：自訂確認對話框 -->
+  <div id="modal-confirm" class="modal-backdrop hidden" role="dialog" aria-modal="true">
+    <div class="modal-sheet modal-sm">
+      <div class="modal-header">
+        <h3 id="confirm-title">確認操作</h3>
+      </div>
+      <div class="modal-body">
+        <p id="confirm-message" class="confirm-text"></p>
+        <div class="modal-footer">
+          <div></div>
+          <div class="footer-right">
+            <button id="btn-confirm-cancel" class="btn btn-outline" type="button">取消</button>
+            <button id="btn-confirm-ok" class="btn btn-danger" type="button">確定刪除</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="./app.js"></script>
+</body>
+</html>
