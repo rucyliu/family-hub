@@ -7,11 +7,11 @@ const CONFIG = {
   PAGE_SIZE: 20,
   PRESET_TAGS: [
     { name: '共同', color: '#2563eb' },
-    { name: '寵物', color: '#059669' },
-    { name: '出遊', color: '#d97706' },
-    { name: '個人', color: '#7c3aed' },
-    { name: '重要', color: '#dc2626' },
-    { name: '一般', color: '#475569' },
+    { name: 'Miro', color: '#059669' },
+    { name: '媽', color: '#d97706' },
+    { name: '瑞', color: '#7c3aed' },
+    { name: 'Wan', color: '#dc2626' },
+    { name: '煮煮', color: '#475569' },
   ],
 };
 
