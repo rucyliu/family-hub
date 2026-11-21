@@ -124,8 +124,25 @@
     <main id="view-album" class="view-pane hidden">
       <div class="album-tip-banner">
         <i class="fa-brands fa-line"></i>
-        <span>直接將照片或 50 MB 內短影片傳給官方帳號，就會自動收錄到這裡。</span>
+        <span>直接將照片或短影片傳給官方帳號，就會自動收錄到這裡。</span>
       </div>
+
+      <!-- 關鍵字搜尋與成員頭像篩選列 -->
+      <section class="album-search-panel" aria-label="搜尋與篩選相簿">
+        <div class="search-input-wrap">
+          <i class="fa-solid fa-magnifying-glass search-icon"></i>
+          <input
+            id="album-search-input"
+            type="search"
+            placeholder="搜尋日記文字、地點或關聯行程..."
+            autocomplete="off"
+          />
+          <button id="btn-clear-search" class="search-clear-btn hidden" type="button" aria-label="清除搜尋文字">
+            <i class="fa-solid fa-circle-xmark"></i>
+          </button>
+        </div>
+        <div id="album-member-filter" class="member-filter-bar" aria-label="依上傳成員篩選"></div>
+      </section>
 
       <!-- 篩選狀態列（從行事曆點擊關聯進入時顯示） -->
       <div id="album-filter-bar" class="filter-bar hidden">
