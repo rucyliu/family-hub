@@ -1,4 +1,5 @@
 /**
+ * 家庭行事曆與生活相簿前端主程式（完整整合版）
  * 請將以下兩組設定替換為你自己的 LIFF ID 與 GAS 部署網址 (/exec)
  */
 const CONFIG = {
@@ -39,7 +40,11 @@ const state = {
   albumPage: 1,
   albumHasMore: false,
   albumLoadedOnce: false,
-  albumFilter: null, // { type: 'event'|'date'|'post', value: '...', label: '...' }
+  albumFilter: null,   // { type: 'event'|'date'|'post', value: '...', label: '...' }
+  albumKeyword: '',    // 關鍵字搜尋
+  albumAuthorId: '',   // 上傳成員篩選
+  albumTotal: 0,       // 符合條件總篇數
+  albumReqSeq: 0,      // 請求序號，避免非同步回應亂序覆蓋
 
   // 編輯與燈箱暫存
   editingPost: null,
@@ -99,6 +104,7 @@ async function verifyMemberAndBoot() {
   state.user = res.data.user;
   state.usersMap = res.data.usersMap || {};
   renderHeaderProfile();
+  renderAlbumMemberFilter();
   showScreen('app');
 
   // 解析網址參數（支援 LINE Bot 卡片帶入 ?tab=album&editPost=post_xxx）
@@ -197,7 +203,7 @@ async function switchTab(tab) {
 }
 
 // ============================================================================
-// 分頁 1：行事曆邏輯
+// 分頁 1：行事曆邏輯與標籤快速篩選
 // ============================================================================
 async function loadCalendarMonth(year, month) {
   state.viewYear = year;
@@ -227,7 +233,6 @@ function renderCalendarTagFilter() {
   if (!bar) return;
   bar.innerHTML = '';
 
-  // 統計當月各標籤行程數，並收集自訂標籤
   const counts = {};
   const customTags = new Set();
   const presetNames = CONFIG.PRESET_TAGS.map((t) => t.name);
@@ -240,19 +245,16 @@ function renderCalendarTagFilter() {
     }
   });
 
-  // 若切換月份後，目前選中的自訂標籤在該月為 0 筆，仍保留在列上方便一鍵解除
   if (state.selectedTagFilter && !presetNames.includes(state.selectedTagFilter)) {
     customTags.add(state.selectedTagFilter);
   }
 
   const allTags = [...presetNames, ...Array.from(customTags)];
 
-  // 1. 「全部」按鈕
   bar.appendChild(
     createFilterChip('', '全部', '#1e293b', state.monthEvents.length, state.selectedTagFilter === '')
   );
 
-  // 2. 各標籤按鈕
   allTags.forEach((tagName) => {
     const isActive = state.selectedTagFilter === tagName;
     const count = counts[tagName] || 0;
@@ -289,7 +291,6 @@ function createFilterChip(value, label, color, count, isActive) {
   }
 
   btn.addEventListener('click', () => {
-    // 重複點擊已選取的標籤即切回「全部」
     state.selectedTagFilter = (state.selectedTagFilter === value) ? '' : value;
     renderCalendarTagFilter();
     renderCalendarGrid();
@@ -351,7 +352,6 @@ function renderCalendarGrid() {
     }
     cell.appendChild(topRow);
 
-    // 篩選當日行程並顯示最多 2 條色條
     const dayEvents = getEventsForDate(dateStr);
     if (dayEvents.length > 0) {
       const bars = document.createElement('div');
@@ -473,7 +473,6 @@ function renderSelectedDayPanel() {
         card.appendChild(content);
       }
 
-      // 輕量關聯：若有綁定相簿照片/影片，顯示導向按鈕
       if (ev.linked_media_count > 0) {
         const pill = document.createElement('button');
         pill.type = 'button';
@@ -566,7 +565,8 @@ function openEventModal(ev = null) {
   const metaEl = document.getElementById('ev-meta-info');
   if (isEdit) {
     delBtn.classList.remove('hidden');
-    const updater = state.usersMap[ev.updated_by]?.display_name || '成員';
+    // 相容舊試算表 LastEditor 可能直接存暱稱而非 LineID 的情況
+    const updater = state.usersMap[ev.updated_by]?.display_name || ev.updated_by || '成員';
     metaEl.textContent = `最後編輯：${updater}（${ev.updated_at || ''}）`;
     metaEl.classList.remove('hidden');
   } else {
@@ -641,9 +641,72 @@ async function handleDeleteEvent() {
 }
 
 // ============================================================================
-// 分頁 2：生活相簿邏輯
+// 分頁 2：生活相簿邏輯（含關鍵字搜尋與成員篩選）
 // ============================================================================
+function renderAlbumMemberFilter() {
+  const bar = document.getElementById('album-member-filter');
+  if (!bar) return;
+  bar.innerHTML = '';
+
+  const allBtn = document.createElement('button');
+  allBtn.type = 'button';
+  allBtn.className = 'member-chip' + (!state.albumAuthorId ? ' active' : '');
+  allBtn.innerHTML = '<span class="member-chip-icon"><i class="fa-solid fa-users"></i></span><span>全部成員</span>';
+  allBtn.addEventListener('click', () => {
+    if (!state.albumAuthorId) return;
+    state.albumAuthorId = '';
+    renderAlbumMemberFilter();
+    loadAlbumPosts(1, false);
+  });
+  bar.appendChild(allBtn);
+
+  const activeUsers = Object.values(state.usersMap || {}).filter((u) => u.role === 'active');
+  activeUsers.forEach((u) => {
+    const isActive = state.albumAuthorId === u.user_id;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'member-chip' + (isActive ? ' active' : '');
+
+    if (u.avatar_url) {
+      const img = document.createElement('img');
+      img.className = 'member-chip-avatar';
+      img.src = u.avatar_url;
+      img.alt = u.display_name || '成員';
+      btn.appendChild(img);
+    } else {
+      const iconWrap = document.createElement('span');
+      iconWrap.className = 'member-chip-icon';
+      iconWrap.innerHTML = '<i class="fa-solid fa-user"></i>';
+      btn.appendChild(iconWrap);
+    }
+
+    const nameSpan = document.createElement('span');
+    nameSpan.textContent = u.display_name || '成員';
+    btn.appendChild(nameSpan);
+
+    btn.addEventListener('click', () => {
+      state.albumAuthorId = isActive ? '' : u.user_id;
+      renderAlbumMemberFilter();
+      loadAlbumPosts(1, false);
+    });
+
+    bar.appendChild(btn);
+  });
+}
+
+function resetAllAlbumFilters() {
+  state.albumFilter = null;
+  state.albumKeyword = '';
+  state.albumAuthorId = '';
+  const input = document.getElementById('album-search-input');
+  if (input) input.value = '';
+  const clearBtn = document.getElementById('btn-clear-search');
+  if (clearBtn) clearBtn.classList.add('hidden');
+  renderAlbumMemberFilter();
+}
+
 async function jumpToAlbumFilter(filterObj) {
+  resetAllAlbumFilters();
   state.albumFilter = filterObj;
   state.albumLoadedOnce = true;
   await switchTab('album');
@@ -651,16 +714,11 @@ async function jumpToAlbumFilter(filterObj) {
 }
 
 async function loadAlbumPosts(page = 1, append = false) {
+  const reqId = ++state.albumReqSeq;
   const listEl = document.getElementById('album-list');
   const loadMoreBtn = document.getElementById('btn-load-more');
-  const filterBar = document.getElementById('album-filter-bar');
 
-  if (state.albumFilter) {
-    document.getElementById('album-filter-label').textContent = state.albumFilter.label;
-    filterBar.classList.remove('hidden');
-  } else {
-    filterBar.classList.add('hidden');
-  }
+  updateAlbumFilterBar(false);
 
   if (!append) {
     listEl.innerHTML = '<div class="empty-hint">載入相簿中...</div>';
@@ -674,9 +732,13 @@ async function loadAlbumPosts(page = 1, append = false) {
     if (state.albumFilter.type === 'date') payload.postDate = state.albumFilter.value;
     if (state.albumFilter.type === 'post') payload.postId = state.albumFilter.value;
   }
+  if (state.albumKeyword) payload.keyword = state.albumKeyword;
+  if (state.albumAuthorId) payload.authorId = state.albumAuthorId;
 
   try {
     const res = await apiCall('getAlbumPosts', payload);
+    if (reqId !== state.albumReqSeq) return;
+
     if (!res.ok) {
       showToast(res.message || '載入相簿失敗', 'error');
       return;
@@ -684,6 +746,7 @@ async function loadAlbumPosts(page = 1, append = false) {
 
     const posts = res.data.posts || [];
     state.albumPage = res.data.page || page;
+    state.albumTotal = Number(res.data.total || 0);
     state.albumHasMore = Boolean(res.data.hasMore);
     state.albumLoadedOnce = true;
 
@@ -693,12 +756,39 @@ async function loadAlbumPosts(page = 1, append = false) {
       state.albumPosts = posts;
     }
 
+    updateAlbumFilterBar(true);
     renderAlbumList();
   } catch (err) {
-    showToast('無法連線取得相簿資料', 'error');
+    if (reqId === state.albumReqSeq) {
+      showToast('無法連線取得相簿資料', 'error');
+    }
   } finally {
-    loadMoreBtn.disabled = false;
+    if (reqId === state.albumReqSeq) {
+      loadMoreBtn.disabled = false;
+    }
   }
+}
+
+function updateAlbumFilterBar(showCount) {
+  const filterBar = document.getElementById('album-filter-bar');
+  const labelEl = document.getElementById('album-filter-label');
+  const parts = [];
+
+  if (state.albumFilter) parts.push(state.albumFilter.label);
+  if (state.albumAuthorId) {
+    const name = state.usersMap[state.albumAuthorId]?.display_name || '成員';
+    parts.push(`上傳者：${name}`);
+  }
+  if (state.albumKeyword) parts.push(`關鍵字「${state.albumKeyword}」`);
+
+  if (parts.length === 0) {
+    filterBar.classList.add('hidden');
+    return;
+  }
+
+  const suffix = showCount ? `（共 ${state.albumTotal} 篇）` : '（搜尋中...）';
+  labelEl.textContent = parts.join(' ＋ ') + suffix;
+  filterBar.classList.remove('hidden');
 }
 
 function renderAlbumList() {
@@ -707,10 +797,11 @@ function renderAlbumList() {
   listEl.innerHTML = '';
 
   if (state.albumPosts.length === 0) {
+    const hasFilter = Boolean(state.albumFilter || state.albumKeyword || state.albumAuthorId);
     const empty = document.createElement('div');
     empty.className = 'empty-hint';
-    empty.textContent = state.albumFilter
-      ? '這個篩選條件下沒有相簿紀錄'
+    empty.textContent = hasFilter
+      ? '找不到符合條件的生活相簿紀錄'
       : '目前還沒有照片或影片，直接在 LINE 傳給官方帳號就會出現在這裡！';
     listEl.appendChild(empty);
     loadMoreWrap.classList.add('hidden');
@@ -721,7 +812,6 @@ function renderAlbumList() {
     const card = document.createElement('article');
     card.className = 'post-card';
 
-    // 卡片頂部（作者＋日期＋編輯按鈕）
     const header = document.createElement('div');
     header.className = 'post-header';
 
@@ -761,7 +851,7 @@ function renderAlbumList() {
     header.appendChild(editBtn);
     card.appendChild(header);
 
-    // 關聯行程標籤（點擊跳回行事曆對應日期）
+    // 關聯行程標籤（點擊跳回行事曆對應日期並清除行事曆標籤篩選）
     if (post.linked_event) {
       const pill = document.createElement('button');
       pill.type = 'button';
@@ -773,7 +863,7 @@ function renderAlbumList() {
       pill.addEventListener('click', async () => {
         const targetDate = post.linked_event.start_date;
         state.selectedDate = targetDate;
-        state.selectedTagFilter = ''; // 確保跳回行事曆時能直接看到目標行程
+        state.selectedTagFilter = '';
         const [y, m] = targetDate.split('-').map(Number);
         state.viewYear = y;
         state.viewMonth = m;
@@ -782,7 +872,6 @@ function renderAlbumList() {
       card.appendChild(pill);
     }
 
-    // 換行文字說明
     if (post.caption) {
       const cap = document.createElement('p');
       cap.className = 'post-caption';
@@ -790,7 +879,6 @@ function renderAlbumList() {
       card.appendChild(cap);
     }
 
-    // 省流量媒體縮圖網格
     const media = post.media || [];
     if (media.length > 0) {
       const grid = document.createElement('div');
@@ -894,7 +982,6 @@ async function loadNearbyEventsSelect(centerDate, currentLinkedId, currentLinked
 
     select.innerHTML = '<option value="">不關聯行程</option>';
 
-    // 若原本關聯的行程超出前後 14 天範圍，仍保留於選單避免誤清空
     if (currentLinkedId && !events.some((e) => e.event_id === currentLinkedId) && currentLinkedObj) {
       const opt = document.createElement('option');
       opt.value = currentLinkedObj.event_id;
@@ -1078,7 +1165,18 @@ async function handleSaveProfile(e) {
     if (state.usersMap[state.user.user_id]) {
       state.usersMap[state.user.user_id].display_name = name;
     }
+    state.albumPosts.forEach((p) => {
+      if (p.created_by === state.user.user_id && p.author) {
+        p.author.display_name = name;
+      }
+    });
+
     renderHeaderProfile();
+    renderAlbumMemberFilter();
+    if (state.albumLoadedOnce) {
+      updateAlbumFilterBar(true);
+      renderAlbumList();
+    }
     closeModal('modal-profile');
     showToast('暱稱已更新', 'success');
   } catch (err) {
@@ -1218,9 +1316,48 @@ function bindEvents() {
   document.getElementById('form-event').addEventListener('submit', handleSaveEvent);
   document.getElementById('btn-delete-event').addEventListener('click', handleDeleteEvent);
 
-  // 相簿操作
+  // 相簿搜尋、成員篩選與載入更多
+  let albumSearchTimer = null;
+  const searchInput = document.getElementById('album-search-input');
+  const clearSearchBtn = document.getElementById('btn-clear-search');
+
+  if (searchInput && clearSearchBtn) {
+    searchInput.addEventListener('input', (e) => {
+      const val = e.target.value.trim();
+      clearSearchBtn.classList.toggle('hidden', !val);
+
+      clearTimeout(albumSearchTimer);
+      albumSearchTimer = setTimeout(() => {
+        if (state.albumKeyword === val) return;
+        state.albumKeyword = val;
+        loadAlbumPosts(1, false);
+      }, 400);
+    });
+
+    searchInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        clearTimeout(albumSearchTimer);
+        state.albumKeyword = searchInput.value.trim();
+        loadAlbumPosts(1, false);
+      }
+    });
+
+    clearSearchBtn.addEventListener('click', () => {
+      clearTimeout(albumSearchTimer);
+      searchInput.value = '';
+      clearSearchBtn.classList.add('hidden');
+      if (state.albumKeyword) {
+        state.albumKeyword = '';
+        loadAlbumPosts(1, false);
+      }
+      searchInput.focus();
+    });
+  }
+
   document.getElementById('btn-clear-filter').addEventListener('click', () => {
-    state.albumFilter = null;
+    clearTimeout(albumSearchTimer);
+    resetAllAlbumFilters();
     loadAlbumPosts(1, false);
   });
   document.getElementById('btn-load-more').addEventListener('click', () => {
