@@ -2,8 +2,8 @@
  * 請將以下兩組設定替換為你自己的 LIFF ID 與 GAS 部署網址 (/exec)
  */
 const CONFIG = {
-  LIFF_ID: '請填入你的_LIFF_ID',
-  GAS_API_URL: 'https://script.google.com/macros/s/請填入你的部署ID/exec',
+  LIFF_ID: '2012740107-BWMenJbV',
+  GAS_API_URL: 'https://script.google.com/macros/s/AKfycbxzEXBgWZOKJHHwI9NCE_QYeJ0hlUyuG2Hfa0JoxiRDIcFLEEVieTS1HKRenGImDmbU/exec',
   PAGE_SIZE: 20,
   PRESET_TAGS: [
     { name: '共同', color: '#2563eb' },
