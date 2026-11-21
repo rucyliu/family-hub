@@ -3,15 +3,15 @@
  */
 const CONFIG = {
   LIFF_ID: '2012740107-BWMenJbV',
-  GAS_API_URL: 'https://script.google.com/macros/s/AKfycbxzEXBgWZOKJHHwI9NCE_QYeJ0hlUyuG2Hfa0JoxiRDIcFLEEVieTS1HKRenGImDmbU/exec',
+  GAS_API_URL: 'https://script.google.com/macros/s/AKfycbwuKl5ZZD5OlEM9oND5WEtFKOudhO8cTqJkegxjKfm0_uQ0J3kkGI8qIWtcGpePTk0rsg/exec',
   PAGE_SIZE: 20,
   PRESET_TAGS: [
     { name: '共同', color: '#2563eb' },
-    { name: 'Miro', color: '#059669' },
+    { name: '米', color: '#059669' },
     { name: '媽', color: '#d97706' },
-    { name: '瑞', color: '#7c3aed' },
-    { name: 'Wan', color: '#dc2626' },
-    { name: '煮煮', color: '#475569' },
+    { name: '煮', color: '#7c3aed' },
+    { name: '二', color: '#dc2626' },
+    { name: '瑞', color: '#475569' },
   ],
 };
 
@@ -29,6 +29,7 @@ const state = {
   viewYear: nowDate.getFullYear(),
   viewMonth: nowDate.getMonth() + 1,
   selectedDate: toDateStr(nowDate),
+  selectedTagFilter: '', // 空字串代表「全部」
   monthEvents: [],
   photoDates: new Set(),
   dayThumbnails: {},
@@ -213,11 +214,89 @@ async function loadCalendarMonth(year, month) {
     state.photoDates = new Set(res.data.photoDates || []);
     state.dayThumbnails = res.data.dayThumbnails || {};
 
+    renderCalendarTagFilter();
     renderCalendarGrid();
     renderSelectedDayPanel();
   } catch (err) {
     showToast('無法連線取得行程資料', 'error');
   }
+}
+
+function renderCalendarTagFilter() {
+  const bar = document.getElementById('cal-tag-filter');
+  if (!bar) return;
+  bar.innerHTML = '';
+
+  // 統計當月各標籤行程數，並收集自訂標籤
+  const counts = {};
+  const customTags = new Set();
+  const presetNames = CONFIG.PRESET_TAGS.map((t) => t.name);
+
+  state.monthEvents.forEach((ev) => {
+    const tag = (ev.tag || '一般').trim();
+    counts[tag] = (counts[tag] || 0) + 1;
+    if (!presetNames.includes(tag)) {
+      customTags.add(tag);
+    }
+  });
+
+  // 若切換月份後，目前選中的自訂標籤在該月為 0 筆，仍保留在列上方便一鍵解除
+  if (state.selectedTagFilter && !presetNames.includes(state.selectedTagFilter)) {
+    customTags.add(state.selectedTagFilter);
+  }
+
+  const allTags = [...presetNames, ...Array.from(customTags)];
+
+  // 1. 「全部」按鈕
+  bar.appendChild(
+    createFilterChip('', '全部', '#1e293b', state.monthEvents.length, state.selectedTagFilter === '')
+  );
+
+  // 2. 各標籤按鈕
+  allTags.forEach((tagName) => {
+    const isActive = state.selectedTagFilter === tagName;
+    const count = counts[tagName] || 0;
+    bar.appendChild(
+      createFilterChip(tagName, tagName, getTagColor(tagName), count, isActive)
+    );
+  });
+}
+
+function createFilterChip(value, label, color, count, isActive) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'filter-chip' + (isActive ? ' active' : '');
+  if (isActive) {
+    btn.style.backgroundColor = color;
+  }
+
+  if (value) {
+    const dot = document.createElement('span');
+    dot.className = 'filter-dot';
+    dot.style.backgroundColor = color;
+    btn.appendChild(dot);
+  }
+
+  const text = document.createElement('span');
+  text.textContent = label;
+  btn.appendChild(text);
+
+  if (count > 0 || value === '') {
+    const num = document.createElement('span');
+    num.className = 'filter-count';
+    num.textContent = `(${count})`;
+    btn.appendChild(num);
+  }
+
+  btn.addEventListener('click', () => {
+    // 重複點擊已選取的標籤即切回「全部」
+    state.selectedTagFilter = (state.selectedTagFilter === value) ? '' : value;
+    renderCalendarTagFilter();
+    renderCalendarGrid();
+    renderSelectedDayPanel();
+  });
+
+  return btn;
 }
 
 function renderCalendarGrid() {
@@ -310,7 +389,12 @@ function renderCalendarGrid() {
 function getEventsForDate(dateStr) {
   return state.monthEvents.filter((ev) => {
     const end = ev.end_date || ev.start_date;
-    return ev.start_date <= dateStr && end >= dateStr;
+    const inDate = ev.start_date <= dateStr && end >= dateStr;
+    if (!inDate) return false;
+    if (state.selectedTagFilter) {
+      return (ev.tag || '一般').trim() === state.selectedTagFilter;
+    }
+    return true;
   });
 }
 
@@ -326,7 +410,23 @@ function renderSelectedDayPanel() {
   if (dayEvents.length === 0) {
     const empty = document.createElement('div');
     empty.className = 'empty-hint';
-    empty.textContent = '這天還沒有安排行程';
+    if (state.selectedTagFilter) {
+      empty.textContent = `這天沒有「${state.selectedTagFilter}」相關行程`;
+      const clearBtn = document.createElement('button');
+      clearBtn.type = 'button';
+      clearBtn.className = 'link-btn';
+      clearBtn.style.marginLeft = '6px';
+      clearBtn.textContent = '顯示全部';
+      clearBtn.addEventListener('click', () => {
+        state.selectedTagFilter = '';
+        renderCalendarTagFilter();
+        renderCalendarGrid();
+        renderSelectedDayPanel();
+      });
+      empty.appendChild(clearBtn);
+    } else {
+      empty.textContent = '這天還沒有安排行程';
+    }
     listEl.appendChild(empty);
   } else {
     dayEvents.forEach((ev) => {
@@ -460,7 +560,7 @@ function openEventModal(ev = null) {
   document.getElementById('ev-end-date').value = isEdit ? (ev.end_date || ev.start_date) : state.selectedDate;
   document.getElementById('ev-start-time').value = isEdit ? (ev.start_time || '') : '';
   document.getElementById('ev-content').value = isEdit ? (ev.content || '') : '';
-  renderTagChips(isEdit ? ev.tag : '共同');
+  renderTagChips(isEdit ? ev.tag : (state.selectedTagFilter || '共同'));
 
   const delBtn = document.getElementById('btn-delete-event');
   const metaEl = document.getElementById('ev-meta-info');
@@ -673,6 +773,7 @@ function renderAlbumList() {
       pill.addEventListener('click', async () => {
         const targetDate = post.linked_event.start_date;
         state.selectedDate = targetDate;
+        state.selectedTagFilter = ''; // 確保跳回行事曆時能直接看到目標行程
         const [y, m] = targetDate.split('-').map(Number);
         state.viewYear = y;
         state.viewMonth = m;
