@@ -309,6 +309,63 @@ body {
   margin-bottom: 12px;
 }
 
+/* ===== 標籤快速篩選列 ===== */
+.cal-tag-filter {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow-x: auto;
+  padding: 2px 0 10px;
+  margin-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+  scrollbar-width: none; /* Firefox 隱藏捲軸 */
+}
+
+.cal-tag-filter::-webkit-scrollbar {
+  display: none; /* Chrome / Safari 隱藏捲軸 */
+}
+
+.filter-chip {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 11px;
+  border-radius: 999px;
+  border: 1px solid #cbd5e1;
+  background: #ffffff;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.filter-chip:hover {
+  background: #f8fafc;
+}
+
+.filter-chip.active {
+  color: #ffffff;
+  border-color: transparent;
+}
+
+.filter-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.filter-chip.active .filter-dot {
+  background: rgba(255, 255, 255, 0.9) !important;
+}
+
+.filter-count {
+  font-size: 11px;
+  opacity: 0.78;
+}
+
 .cal-nav {
   display: flex;
   align-items: center;
