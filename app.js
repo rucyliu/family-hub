@@ -1,20 +1,22 @@
 /**
- * 家庭行事曆與生活相簿前端主程式（完整整合版）
+ * 家庭行事曆與生活相簿前端主程式（全修正整合版）
  * 請將以下兩組設定替換為你自己的 LIFF ID 與 GAS 部署網址 (/exec)
  */
 const CONFIG = {
   LIFF_ID: '2012740107-BWMenJbV',
   GAS_API_URL: 'https://script.google.com/macros/s/AKfycbwuKl5ZZD5OlEM9oND5WEtFKOudhO8cTqJkegxjKfm0_uQ0J3kkGI8qIWtcGpePTk0rsg/exec',
   PAGE_SIZE: 20,
-  PRESET_TAGS: [
-    { name: '共同', color: '#2563eb' },
-    { name: '米', color: '#059669' },
-    { name: '媽', color: '#d97706' },
-    { name: '煮', color: '#7c3aed' },
-    { name: '二', color: '#dc2626' },
-    { name: '瑞', color: '#475569' },
-  ],
 };
+
+// 高對比自動標籤調色盤（同標籤透過雜湊永遠固定對應同一色碼）
+const TAG_COLOR_PALETTE = [
+  '#2563eb', '#059669', '#d97706', '#7c3aed',
+  '#dc2626', '#0891b2', '#db2777', '#4f46e5',
+  '#65a30d', '#ea580c', '#9333ea', '#0d9488',
+  '#e11d48', '#0284c7', '#ca8a04', '#475569',
+];
+
+const RELOGIN_COOLDOWN_KEY = 'family_hub_relogin_ts';
 
 // ============================================================================
 // 應用程式狀態
@@ -25,12 +27,15 @@ const state = {
   user: null,
   usersMap: {},
   currentTab: 'calendar',
+  isReloggingIn: false,
 
   // 行事曆狀態
   viewYear: nowDate.getFullYear(),
   viewMonth: nowDate.getMonth() + 1,
   selectedDate: toDateStr(nowDate),
-  selectedTagFilter: '', // 空字串代表「全部」
+  selectedTagFilter: '',
+  existingTags: [],      // 整份試算表目前已存在的標籤清單
+  modalSelectedTags: [], // 行程編輯彈窗中已勾選的多選標籤（依順序，第 1 個決定月曆底色）
   monthEvents: [],
   photoDates: new Set(),
   dayThumbnails: {},
@@ -40,11 +45,11 @@ const state = {
   albumPage: 1,
   albumHasMore: false,
   albumLoadedOnce: false,
-  albumFilter: null,   // { type: 'event'|'date'|'post', value: '...', label: '...' }
-  albumKeyword: '',    // 關鍵字搜尋
-  albumAuthorId: '',   // 上傳成員篩選
-  albumTotal: 0,       // 符合條件總篇數
-  albumReqSeq: 0,      // 請求序號，避免非同步回應亂序覆蓋
+  albumFilter: null,
+  albumKeyword: '',
+  albumAuthorId: '',
+  albumTotal: 0,
+  albumReqSeq: 0,
 
   // 編輯與燈箱暫存
   editingPost: null,
@@ -53,7 +58,7 @@ const state = {
 };
 
 // ============================================================================
-// 初始化與 LIFF 登入流程
+// 初始化、LIFF 登入與 PC 過期憑證自動重登機制
 // ============================================================================
 document.addEventListener('DOMContentLoaded', () => {
   bindEvents();
@@ -75,10 +80,17 @@ async function initApp() {
       throw new Error('無法取得 LINE ID Token，請確認 LIFF Scopes 已勾選 openid。');
     }
 
+    // 啟動時即檢查 id_token 是否已過期（PC 久置重開常見情境）
+    if (isIdTokenExpired(state.idToken)) {
+      const triggered = triggerRelogin(false);
+      if (triggered) return;
+      throw new Error('LINE 登入憑證已過期，請點擊下方「重新登入 LINE」。');
+    }
+
     await verifyMemberAndBoot();
   } catch (err) {
     console.error(err);
-    showScreen('error', err.message || 'LIFF 初始化失敗，請確認 LIFF ID 與網路連線。');
+    showScreen('error', err.message || 'LIFF 初始化失敗，請點擊「重新登入 LINE」。');
   }
 }
 
@@ -87,6 +99,10 @@ async function verifyMemberAndBoot() {
   const res = await apiCall('getMe', {});
 
   if (!res.ok) {
+    if (res.code === 'UNAUTHORIZED') {
+      if (triggerRelogin(false)) return;
+      throw new Error('LINE 登入憑證已過期或無效，請點擊下方「重新登入 LINE」。');
+    }
     if (res.code === 'PENDING_APPROVAL') {
       const u = (res.data && res.data.user) || {};
       document.getElementById('pending-name').textContent = u.display_name || '新成員';
@@ -101,13 +117,15 @@ async function verifyMemberAndBoot() {
     throw new Error(res.message || '驗證失敗');
   }
 
+  // 成功登入後清除重登冷卻紀錄
+  try { sessionStorage.removeItem(RELOGIN_COOLDOWN_KEY); } catch (_) {}
+
   state.user = res.data.user;
   state.usersMap = res.data.usersMap || {};
   renderHeaderProfile();
   renderAlbumMemberFilter();
   showScreen('app');
 
-  // 解析網址參數（支援 LINE Bot 卡片帶入 ?tab=album&editPost=post_xxx）
   const params = new URLSearchParams(window.location.search);
   const initTab = params.get('tab') === 'album' ? 'album' : 'calendar';
   const editPostId = params.get('editPost');
@@ -116,16 +134,88 @@ async function verifyMemberAndBoot() {
 
   if (editPostId) {
     await openAlbumEditById(editPostId);
-    // 清除網址參數避免重整時重複彈出
     const cleanUrl = window.location.origin + window.location.pathname;
     window.history.replaceState({}, '', cleanUrl);
   }
 }
 
+/**
+ * 解析 JWT payload 檢查 id_token 是否已過期（提前 60 秒視為過期）
+ */
+function isIdTokenExpired(token) {
+  if (!token) return true;
+  try {
+    let exp = 0;
+    if (typeof liff !== 'undefined' && typeof liff.getDecodedIDToken === 'function') {
+      const decoded = liff.getDecodedIDToken();
+      if (decoded && decoded.exp) exp = Number(decoded.exp);
+    }
+    if (!exp) {
+      const parts = token.split('.');
+      if (parts.length !== 3) return true;
+      const base64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+      const padded = base64 + '='.repeat((4 - (base64.length % 4)) % 4);
+      const payload = JSON.parse(atob(padded));
+      exp = Number(payload.exp || 0);
+    }
+    if (!exp) return false;
+    return (Date.now() / 1000) >= (exp - 60);
+  } catch (e) {
+    return false;
+  }
+}
+
+/**
+ * 清除舊憑證並重新導向 LINE 登入（manual=true 時忽略冷卻保護）
+ */
+function triggerRelogin(manual = false) {
+  if (state.isReloggingIn) return true;
+
+  if (!manual) {
+    try {
+      const lastTs = Number(sessionStorage.getItem(RELOGIN_COOLDOWN_KEY) || '0');
+      // 15 秒內若已自動重登過仍失敗，停止自動跳轉避免無限迴圈，改由使用者手動點擊
+      if (lastTs && Date.now() - lastTs < 15000) {
+        return false;
+      }
+      sessionStorage.setItem(RELOGIN_COOLDOWN_KEY, String(Date.now()));
+    } catch (_) {}
+  }
+
+  state.isReloggingIn = true;
+  showScreen('loading', 'LINE 登入憑證已過期，正在為你重新登入...');
+
+  try {
+    if (typeof liff !== 'undefined') {
+      if (!liff.isInClient()) {
+        if (liff.isLoggedIn()) {
+          liff.logout();
+        }
+        liff.login({ redirectUri: window.location.href });
+        return true;
+      }
+      // 手機 LINE App 內建瀏覽器直接重載即可向 LINE Client 取新 Token
+      window.location.reload();
+      return true;
+    }
+  } catch (err) {
+    console.error('重登失敗:', err);
+  }
+
+  state.isReloggingIn = false;
+  return false;
+}
+
 // ============================================================================
-// API 呼叫（以 text/plain 送 JSON 避開 GAS CORS 預檢）
+// API 呼叫（自動攔截過期憑證）
 // ============================================================================
 async function apiCall(action, payload = {}) {
+  if (isIdTokenExpired(state.idToken)) {
+    if (triggerRelogin(false)) {
+      return { ok: false, code: 'UNAUTHORIZED', message: '正在重新登入 LINE...' };
+    }
+  }
+
   const response = await fetch(CONFIG.GAS_API_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'text/plain;charset=utf-8' },
@@ -142,7 +232,9 @@ async function apiCall(action, payload = {}) {
 
   const data = await response.json();
   if (!data.ok && data.code === 'UNAUTHORIZED') {
-    showToast('LINE 登入已逾時，請重新整理頁面', 'error');
+    if (!triggerRelogin(false)) {
+      showScreen('error', 'LINE 登入憑證已過期或無效，請點擊下方「重新登入 LINE」。');
+    }
   }
   return data;
 }
@@ -203,7 +295,7 @@ async function switchTab(tab) {
 }
 
 // ============================================================================
-// 分頁 1：行事曆邏輯與標籤快速篩選
+// 分頁 1：行事曆邏輯與多標籤篩選
 // ============================================================================
 async function loadCalendarMonth(year, month) {
   state.viewYear = year;
@@ -213,10 +305,15 @@ async function loadCalendarMonth(year, month) {
   try {
     const res = await apiCall('getMonthEvents', { year, month });
     if (!res.ok) {
-      showToast(res.message || '載入行程失敗', 'error');
+      if (res.code !== 'UNAUTHORIZED') showToast(res.message || '載入行程失敗', 'error');
       return;
     }
-    state.monthEvents = res.data.events || [];
+
+    state.monthEvents = (res.data.events || []).map((ev) => ({
+      ...ev,
+      tags: parseTags(ev.tags !== undefined ? ev.tags : ev.tag),
+    }));
+    state.existingTags = parseTags(res.data.allTags || []);
     state.photoDates = new Set(res.data.photoDates || []);
     state.dayThumbnails = res.data.dayThumbnails || {};
 
@@ -234,28 +331,27 @@ function renderCalendarTagFilter() {
   bar.innerHTML = '';
 
   const counts = {};
-  const customTags = new Set();
-  const presetNames = CONFIG.PRESET_TAGS.map((t) => t.name);
-
+  const monthTagOrder = [];
   state.monthEvents.forEach((ev) => {
-    const tag = (ev.tag || '一般').trim();
-    counts[tag] = (counts[tag] || 0) + 1;
-    if (!presetNames.includes(tag)) {
-      customTags.add(tag);
-    }
+    parseTags(ev.tags !== undefined ? ev.tags : ev.tag).forEach((t) => {
+      if (!counts[t]) monthTagOrder.push(t);
+      counts[t] = (counts[t] || 0) + 1;
+    });
   });
 
-  if (state.selectedTagFilter && !presetNames.includes(state.selectedTagFilter)) {
-    customTags.add(state.selectedTagFilter);
+  // 確保切換月份後若目前仍有篩選中的標籤，仍保留於篩選列方便解除
+  if (state.selectedTagFilter && !counts[state.selectedTagFilter]) {
+    monthTagOrder.push(state.selectedTagFilter);
   }
 
-  const allTags = [...presetNames, ...Array.from(customTags)];
+  // 若本月無標籤但全表已有標籤，顯示全表標籤方便快速查看
+  const displayTags = monthTagOrder.length > 0 ? monthTagOrder : state.existingTags;
 
   bar.appendChild(
     createFilterChip('', '全部', '#1e293b', state.monthEvents.length, state.selectedTagFilter === '')
   );
 
-  allTags.forEach((tagName) => {
+  displayTags.forEach((tagName) => {
     const isActive = state.selectedTagFilter === tagName;
     const count = counts[tagName] || 0;
     bar.appendChild(
@@ -270,6 +366,9 @@ function createFilterChip(value, label, color, count, isActive) {
   btn.className = 'filter-chip' + (isActive ? ' active' : '');
   if (isActive) {
     btn.style.backgroundColor = color;
+  } else if (value) {
+    btn.style.borderColor = color;
+    btn.style.color = color;
   }
 
   if (value) {
@@ -352,23 +451,19 @@ function renderCalendarGrid() {
     }
     cell.appendChild(topRow);
 
+    // 單日所有行程項目全部顯示（底色取第一個標籤顏色，文字優先標題、無標題顯示標籤）
     const dayEvents = getEventsForDate(dateStr);
     if (dayEvents.length > 0) {
       const bars = document.createElement('div');
       bars.className = 'cal-bars';
-      dayEvents.slice(0, 2).forEach((ev) => {
+      dayEvents.forEach((ev) => {
         const bar = document.createElement('div');
         bar.className = 'cal-bar';
-        bar.style.backgroundColor = getTagColor(ev.tag);
-        bar.textContent = ev.title;
+        bar.style.backgroundColor = getEventPrimaryColor(ev);
+        bar.textContent = getEventDisplayLabel(ev);
+        bar.title = getEventDisplayLabel(ev);
         bars.appendChild(bar);
       });
-      if (dayEvents.length > 2) {
-        const more = document.createElement('div');
-        more.className = 'cal-more';
-        more.textContent = '+' + (dayEvents.length - 2);
-        bars.appendChild(more);
-      }
       cell.appendChild(bars);
     }
 
@@ -392,7 +487,8 @@ function getEventsForDate(dateStr) {
     const inDate = ev.start_date <= dateStr && end >= dateStr;
     if (!inDate) return false;
     if (state.selectedTagFilter) {
-      return (ev.tag || '一般').trim() === state.selectedTagFilter;
+      const tags = parseTags(ev.tags !== undefined ? ev.tags : ev.tag);
+      return tags.includes(state.selectedTagFilter);
     }
     return true;
   });
@@ -430,10 +526,11 @@ function renderSelectedDayPanel() {
     listEl.appendChild(empty);
   } else {
     dayEvents.forEach((ev) => {
-      const color = getTagColor(ev.tag);
+      const tags = parseTags(ev.tags !== undefined ? ev.tags : ev.tag);
+      const primaryColor = getEventPrimaryColor(ev);
       const card = document.createElement('div');
       card.className = 'event-card';
-      card.style.borderLeftColor = color;
+      card.style.borderLeftColor = primaryColor;
 
       const top = document.createElement('div');
       top.className = 'event-card-top';
@@ -441,11 +538,13 @@ function renderSelectedDayPanel() {
       const badges = document.createElement('div');
       badges.className = 'event-badges';
 
-      const tagBadge = document.createElement('span');
-      tagBadge.className = 'tag-badge';
-      tagBadge.style.backgroundColor = color;
-      tagBadge.textContent = ev.tag || '一般';
-      badges.appendChild(tagBadge);
+      tags.forEach((t) => {
+        const tagBadge = document.createElement('span');
+        tagBadge.className = 'tag-badge';
+        tagBadge.style.backgroundColor = getTagColor(t);
+        tagBadge.textContent = t;
+        badges.appendChild(tagBadge);
+      });
 
       const timeBadge = document.createElement('span');
       timeBadge.className = 'time-badge';
@@ -463,13 +562,13 @@ function renderSelectedDayPanel() {
 
       const title = document.createElement('div');
       title.className = 'event-title';
-      title.textContent = ev.title;
+      title.textContent = getEventDisplayLabel(ev);
       card.appendChild(title);
 
       if (ev.content) {
         const content = document.createElement('p');
         content.className = 'event-content';
-        content.textContent = ev.content; // 搭配 CSS white-space: pre-wrap 安全呈現換行
+        content.textContent = ev.content;
         card.appendChild(content);
       }
 
@@ -486,7 +585,7 @@ function renderSelectedDayPanel() {
           jumpToAlbumFilter({
             type: 'event',
             value: ev.event_id,
-            label: `行程相簿：${ev.title}`,
+            label: `行程相簿：${getEventDisplayLabel(ev)}`,
           });
         });
         card.appendChild(pill);
@@ -517,55 +616,140 @@ function renderSelectedDayPanel() {
 }
 
 // ============================================================================
-// 行程新增 / 編輯 / 刪除彈窗
+// 行程新增 / 編輯 / 刪除彈窗（多選既有標籤＋新增標籤）
 // ============================================================================
-function renderTagChips(selectedTag) {
-  const wrap = document.getElementById('ev-tag-chips');
-  const customInput = document.getElementById('ev-tag-custom');
-  wrap.innerHTML = '';
+function renderModalTagUI() {
+  const selectedWrap = document.getElementById('ev-selected-tags');
+  const chipsWrap = document.getElementById('ev-tag-chips');
+  if (!selectedWrap || !chipsWrap) return;
 
-  const isPreset = CONFIG.PRESET_TAGS.some((t) => t.name === selectedTag);
-  customInput.value = isPreset ? '' : (selectedTag || '');
+  // 1. 已選擇的標籤區（第 1 個決定月曆底色，點 X 可移除）
+  selectedWrap.innerHTML = '';
+  if (state.modalSelectedTags.length === 0) {
+    const empty = document.createElement('span');
+    empty.className = 'selected-tags-empty';
+    empty.textContent = '尚未選擇標籤（可點下方既有標籤快選，或輸入新標籤）';
+    selectedWrap.appendChild(empty);
+  } else {
+    state.modalSelectedTags.forEach((tag, idx) => {
+      const pill = document.createElement('span');
+      pill.className = 'selected-tag-pill';
+      pill.style.backgroundColor = getTagColor(tag);
 
-  CONFIG.PRESET_TAGS.forEach((t) => {
+      const text = document.createElement('span');
+      text.textContent = tag;
+      pill.appendChild(text);
+
+      if (idx === 0) {
+        const mark = document.createElement('span');
+        mark.className = 'selected-tag-primary-mark';
+        mark.textContent = '底色';
+        pill.appendChild(mark);
+      }
+
+      const removeBtn = document.createElement('button');
+      removeBtn.type = 'button';
+      removeBtn.className = 'selected-tag-remove';
+      removeBtn.setAttribute('aria-label', `移除標籤 ${tag}`);
+      removeBtn.innerHTML = '<i class="fa-solid fa-xmark"></i>';
+      removeBtn.addEventListener('click', () => {
+        state.modalSelectedTags = state.modalSelectedTags.filter((t) => t !== tag);
+        renderModalTagUI();
+      });
+      pill.appendChild(removeBtn);
+
+      selectedWrap.appendChild(pill);
+    });
+  }
+
+  // 2. 既有標籤快選區（整份試算表既有標籤 + 本次編輯新增的標籤）
+  chipsWrap.innerHTML = '';
+  const allChoices = parseTags([...state.existingTags, ...state.modalSelectedTags]);
+
+  allChoices.forEach((tag) => {
+    const color = getTagColor(tag);
+    const isSelected = state.modalSelectedTags.includes(tag);
+
     const btn = document.createElement('button');
     btn.type = 'button';
-    btn.className = 'tag-chip' + (selectedTag === t.name ? ' active' : '');
-    btn.textContent = t.name;
-    if (selectedTag === t.name) {
-      btn.style.backgroundColor = t.color;
+    btn.className = 'tag-chip' + (isSelected ? ' active' : '');
+    if (isSelected) {
+      btn.style.backgroundColor = color;
+    } else {
+      btn.style.borderColor = color;
+      btn.style.color = color;
     }
+
+    if (isSelected) {
+      const check = document.createElement('i');
+      check.className = 'fa-solid fa-check fa-2xs';
+      btn.appendChild(check);
+    } else {
+      const dot = document.createElement('span');
+      dot.className = 'tag-chip-dot';
+      dot.style.backgroundColor = color;
+      btn.appendChild(dot);
+    }
+
+    const label = document.createElement('span');
+    label.textContent = tag;
+    btn.appendChild(label);
+
     btn.addEventListener('click', () => {
-      customInput.value = '';
-      renderTagChips(t.name);
+      if (isSelected) {
+        state.modalSelectedTags = state.modalSelectedTags.filter((t) => t !== tag);
+      } else {
+        state.modalSelectedTags.push(tag);
+      }
+      renderModalTagUI();
     });
-    wrap.appendChild(btn);
+
+    chipsWrap.appendChild(btn);
   });
 }
 
-function getSelectedTagValue() {
-  const custom = document.getElementById('ev-tag-custom').value.trim();
-  if (custom) return custom;
-  const active = document.querySelector('#ev-tag-chips .tag-chip.active');
-  return active ? active.textContent : '一般';
+function addTagsFromInput() {
+  const input = document.getElementById('ev-tag-new-input');
+  if (!input) return;
+  const newTags = parseTags(input.value);
+  if (newTags.length === 0) return;
+
+  newTags.forEach((t) => {
+    if (!state.modalSelectedTags.includes(t)) {
+      state.modalSelectedTags.push(t);
+    }
+    if (!state.existingTags.includes(t)) {
+      state.existingTags.push(t);
+    }
+  });
+  input.value = '';
+  renderModalTagUI();
 }
 
 function openEventModal(ev = null) {
   const isEdit = Boolean(ev);
   document.getElementById('modal-event-title').textContent = isEdit ? '編輯行程' : '新增行程';
   document.getElementById('ev-id').value = isEdit ? ev.event_id : '';
-  document.getElementById('ev-title').value = isEdit ? ev.title : '';
+  document.getElementById('ev-title').value = isEdit ? (ev.title || '') : '';
   document.getElementById('ev-start-date').value = isEdit ? ev.start_date : state.selectedDate;
   document.getElementById('ev-end-date').value = isEdit ? (ev.end_date || ev.start_date) : state.selectedDate;
   document.getElementById('ev-start-time').value = isEdit ? (ev.start_time || '') : '';
   document.getElementById('ev-content').value = isEdit ? (ev.content || '') : '';
-  renderTagChips(isEdit ? ev.tag : (state.selectedTagFilter || '共同'));
+
+  const newTagInput = document.getElementById('ev-tag-new-input');
+  if (newTagInput) newTagInput.value = '';
+
+  if (isEdit) {
+    state.modalSelectedTags = parseTags(ev.tags !== undefined ? ev.tags : ev.tag);
+  } else {
+    state.modalSelectedTags = state.selectedTagFilter ? [state.selectedTagFilter] : [];
+  }
+  renderModalTagUI();
 
   const delBtn = document.getElementById('btn-delete-event');
   const metaEl = document.getElementById('ev-meta-info');
   if (isEdit) {
     delBtn.classList.remove('hidden');
-    // 相容舊試算表 LastEditor 可能直接存暱稱而非 LineID 的情況
     const updater = state.usersMap[ev.updated_by]?.display_name || ev.updated_by || '成員';
     metaEl.textContent = `最後編輯：${updater}（${ev.updated_at || ''}）`;
     metaEl.classList.remove('hidden');
@@ -579,27 +763,44 @@ function openEventModal(ev = null) {
 
 async function handleSaveEvent(e) {
   e.preventDefault();
-  const btn = document.getElementById('btn-save-event');
-  const payload = {
-    event_id: document.getElementById('ev-id').value,
-    title: document.getElementById('ev-title').value.trim(),
-    tag: getSelectedTagValue(),
-    start_date: document.getElementById('ev-start-date').value,
-    end_date: document.getElementById('ev-end-date').value || document.getElementById('ev-start-date').value,
-    start_time: document.getElementById('ev-start-time').value,
-    content: document.getElementById('ev-content').value,
-  };
+  // 若使用者輸入了新標籤文字但直接按儲存，先自動收進已選清單
+  addTagsFromInput();
 
-  if (payload.end_date < payload.start_date) {
+  const btn = document.getElementById('btn-save-event');
+  const title = document.getElementById('ev-title').value.trim();
+  const tags = parseTags(state.modalSelectedTags);
+  const startDate = document.getElementById('ev-start-date').value;
+  const endDate = document.getElementById('ev-end-date').value || startDate;
+
+  if (!startDate) {
+    showToast('請選擇開始日期', 'error');
+    return;
+  }
+  if (!title && tags.length === 0) {
+    showToast('標題與標籤請至少填寫其中一項', 'error');
+    return;
+  }
+  if (endDate < startDate) {
     showToast('結束日期不可早於開始日期', 'error');
     return;
   }
+
+  const payload = {
+    event_id: document.getElementById('ev-id').value,
+    title,
+    tags,
+    tag: tags.join(','),
+    start_date: startDate,
+    end_date: endDate,
+    start_time: document.getElementById('ev-start-time').value,
+    content: document.getElementById('ev-content').value,
+  };
 
   btn.disabled = true;
   try {
     const res = await apiCall('saveEvent', payload);
     if (!res.ok) {
-      showToast(res.message || '儲存失敗', 'error');
+      if (res.code !== 'UNAUTHORIZED') showToast(res.message || '儲存失敗', 'error');
       return;
     }
     closeModal('modal-event');
@@ -627,7 +828,7 @@ async function handleDeleteEvent() {
   try {
     const res = await apiCall('deleteEvent', { event_id: eventId });
     if (!res.ok) {
-      showToast(res.message || '刪除失敗', 'error');
+      if (res.code !== 'UNAUTHORIZED') showToast(res.message || '刪除失敗', 'error');
       return;
     }
     closeModal('modal-event');
@@ -740,7 +941,7 @@ async function loadAlbumPosts(page = 1, append = false) {
     if (reqId !== state.albumReqSeq) return;
 
     if (!res.ok) {
-      showToast(res.message || '載入相簿失敗', 'error');
+      if (res.code !== 'UNAUTHORIZED') showToast(res.message || '載入相簿失敗', 'error');
       return;
     }
 
@@ -851,14 +1052,13 @@ function renderAlbumList() {
     header.appendChild(editBtn);
     card.appendChild(header);
 
-    // 關聯行程標籤（點擊跳回行事曆對應日期並清除行事曆標籤篩選）
     if (post.linked_event) {
       const pill = document.createElement('button');
       pill.type = 'button';
       pill.className = 'post-event-pill';
       pill.innerHTML = '<i class="fa-regular fa-calendar-check"></i>';
       const label = document.createElement('span');
-      label.textContent = `${post.linked_event.title}（${post.linked_event.start_date}）`;
+      label.textContent = `${getEventDisplayLabel(post.linked_event)}（${post.linked_event.start_date}）`;
       pill.appendChild(label);
       pill.addEventListener('click', async () => {
         const targetDate = post.linked_event.start_date;
@@ -900,9 +1100,6 @@ function renderAlbumList() {
   loadMoreWrap.classList.toggle('hidden', !state.albumHasMore);
 }
 
-/**
- * 產生省流量縮圖元素（圖片點開 w1200 燈箱，影片直接另開 Drive 原檔串流）
- */
 function appendMediaThumbElement(container, media, dateLabel) {
   const isVideo = media.media_type === 'video';
   const thumbId = isVideo ? (media.thumb_file_id || media.drive_file_id) : media.drive_file_id;
@@ -942,7 +1139,7 @@ function appendMediaThumbElement(container, media, dateLabel) {
 }
 
 // ============================================================================
-// 相簿編輯彈窗（日期、說明、前後 14 天關聯行程、單檔／整篇刪除）
+// 相簿編輯彈窗
 // ============================================================================
 async function openAlbumEditById(postId) {
   let target = state.albumPosts.find((p) => p.post_id === postId);
@@ -985,14 +1182,17 @@ async function loadNearbyEventsSelect(centerDate, currentLinkedId, currentLinked
     if (currentLinkedId && !events.some((e) => e.event_id === currentLinkedId) && currentLinkedObj) {
       const opt = document.createElement('option');
       opt.value = currentLinkedObj.event_id;
-      opt.textContent = `${currentLinkedObj.start_date}｜${currentLinkedObj.title}`;
+      opt.textContent = `${currentLinkedObj.start_date}｜${getEventDisplayLabel(currentLinkedObj)}`;
       select.appendChild(opt);
     }
 
     events.forEach((ev) => {
       const opt = document.createElement('option');
       opt.value = ev.event_id;
-      opt.textContent = `${ev.start_date}｜[${ev.tag || '一般'}] ${ev.title}`;
+      const tags = parseTags(ev.tags !== undefined ? ev.tags : ev.tag);
+      const tagPrefix = tags.length > 0 ? `[${tags.join('、')}] ` : '';
+      const labelText = ev.title ? `${tagPrefix}${ev.title}` : tags.join('、');
+      opt.textContent = `${ev.start_date}｜${labelText}`;
       select.appendChild(opt);
     });
 
@@ -1045,7 +1245,7 @@ async function handleSavePost(e) {
   try {
     const res = await apiCall('updateAlbumPost', payload);
     if (!res.ok) {
-      showToast(res.message || '儲存失敗', 'error');
+      if (res.code !== 'UNAUTHORIZED') showToast(res.message || '儲存失敗', 'error');
       return;
     }
     closeModal('modal-post');
@@ -1065,7 +1265,7 @@ async function handleDeleteSingleMedia(mediaId) {
   try {
     const res = await apiCall('deleteMedia', { media_id: mediaId });
     if (!res.ok) {
-      showToast(res.message || '刪除失敗', 'error');
+      if (res.code !== 'UNAUTHORIZED') showToast(res.message || '刪除失敗', 'error');
       return;
     }
     showToast('已移除該檔案', 'success');
@@ -1094,7 +1294,7 @@ async function handleDeleteEntirePost() {
   try {
     const res = await apiCall('deleteAlbumPost', { post_id: postId });
     if (!res.ok) {
-      showToast(res.message || '刪除失敗', 'error');
+      if (res.code !== 'UNAUTHORIZED') showToast(res.message || '刪除失敗', 'error');
       return;
     }
     closeModal('modal-post');
@@ -1108,7 +1308,7 @@ async function handleDeleteEntirePost() {
 }
 
 // ============================================================================
-// 大圖燈箱與外部原檔開啟
+// 大圖燈箱（修正關閉時誤觸 onerror 問題）與外部原檔開啟
 // ============================================================================
 function openLightbox(driveFileId, dateLabel) {
   state.lightboxOriginalUrl = getDriveViewUrl(driveFileId);
@@ -1116,25 +1316,37 @@ function openLightbox(driveFileId, dateLabel) {
 
   const img = document.getElementById('lightbox-img');
   const spinner = document.getElementById('lightbox-spinner');
+
+  // 先清除舊監聽再重設圖片
+  img.onload = null;
+  img.onerror = null;
   img.classList.add('hidden');
   spinner.classList.remove('hidden');
 
+  const targetUrl = getDriveThumbUrl(driveFileId, 1200);
   img.onload = () => {
     spinner.classList.add('hidden');
     img.classList.remove('hidden');
   };
   img.onerror = () => {
+    // 若已關閉燈箱則忽略任何殘餘事件
+    if (document.getElementById('modal-lightbox').classList.contains('hidden')) return;
     spinner.classList.add('hidden');
     showToast('預覽載入失敗，請直接點擊下方開啟原檔', 'error');
   };
-  img.src = getDriveThumbUrl(driveFileId, 1200);
+  img.src = targetUrl;
 
   document.getElementById('modal-lightbox').classList.remove('hidden');
 }
 
 function closeLightbox() {
+  const img = document.getElementById('lightbox-img');
+  // 務必先卸載 onload / onerror 再移除 src，避免觸發錯誤提示
+  img.onload = null;
+  img.onerror = null;
+  img.removeAttribute('src');
+  img.classList.add('hidden');
   document.getElementById('modal-lightbox').classList.add('hidden');
-  document.getElementById('lightbox-img').src = '';
 }
 
 function openExternalUrl(url) {
@@ -1146,7 +1358,7 @@ function openExternalUrl(url) {
 }
 
 // ============================================================================
-// 暱稱編輯、自訂確認框、Toast 與通用工具
+// 暱稱編輯、自訂確認框、Toast 與標籤配色／文字工具
 // ============================================================================
 async function handleSaveProfile(e) {
   e.preventDefault();
@@ -1158,7 +1370,7 @@ async function handleSaveProfile(e) {
   try {
     const res = await apiCall('updateMyName', { display_name: name });
     if (!res.ok) {
-      showToast(res.message || '更新暱稱失敗', 'error');
+      if (res.code !== 'UNAUTHORIZED') showToast(res.message || '更新暱稱失敗', 'error');
       return;
     }
     state.user.display_name = name;
@@ -1233,17 +1445,64 @@ function showToast(message, type = 'info') {
   }, 2800);
 }
 
+function parseTags(raw) {
+  let list = [];
+  if (Array.isArray(raw)) {
+    list = raw;
+  } else if (raw !== null && raw !== undefined) {
+    list = String(raw).split(/[,，、]+/);
+  }
+  const seen = new Set();
+  const out = [];
+  list.forEach((item) => {
+    const t = String(item || '').trim();
+    if (t && !seen.has(t)) {
+      seen.add(t);
+      out.push(t);
+    }
+  });
+  return out;
+}
+
+/**
+ * 確定性 FNV-1a 雜湊：相同標籤永遠對應同一顏色
+ */
+function getTagColor(tagName) {
+  const s = String(tagName || '').trim();
+  if (!s) return '#64748b';
+  let hash = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    hash ^= s.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return TAG_COLOR_PALETTE[(hash >>> 0) % TAG_COLOR_PALETTE.length];
+}
+
+/**
+ * 月曆與卡片底色：使用第一個標籤的顏色，無標籤時退回中性灰
+ */
+function getEventPrimaryColor(ev) {
+  const tags = parseTags(ev.tags !== undefined ? ev.tags : ev.tag);
+  return tags.length > 0 ? getTagColor(tags[0]) : '#64748b';
+}
+
+/**
+ * 顯示文字：有填標題顯示標題，否則顯示標籤名稱
+ */
+function getEventDisplayLabel(ev) {
+  const title = String(ev.title || '').trim();
+  if (title) return title;
+  const tags = parseTags(ev.tags !== undefined ? ev.tags : ev.tag);
+  if (tags.length > 0) return tags.join('、');
+  return '（未命名行程）';
+}
+
 function getDriveThumbUrl(fileId, width) {
   return `https://drive.google.com/thumbnail?id=${encodeURIComponent(fileId)}&sz=w${width}`;
 }
 
 function getDriveViewUrl(fileId) {
   return `https://drive.google.com/file/d/${encodeURIComponent(fileId)}/view`;
-}
-
-function getTagColor(tagName) {
-  const found = CONFIG.PRESET_TAGS.find((t) => t.name === tagName);
-  return found ? found.color : '#475569';
 }
 
 function toDateStr(d) {
@@ -1263,9 +1522,20 @@ function getWeekdayLabel(dateStr) {
 // 全域事件綁定
 // ============================================================================
 function bindEvents() {
-  // 重試與重整
+  // 重試、重登與重整
   document.getElementById('btn-retry-auth').addEventListener('click', () => verifyMemberAndBoot());
   document.getElementById('btn-reload-app').addEventListener('click', () => window.location.reload());
+  const reloginBtn = document.getElementById('btn-relogin-app');
+  if (reloginBtn) {
+    reloginBtn.addEventListener('click', () => triggerRelogin(true));
+  }
+
+  // PC 久置後切回分頁時，自動檢查憑證是否已過期
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && state.user && isIdTokenExpired(state.idToken)) {
+      triggerRelogin(false);
+    }
+  });
 
   // 底部雙分頁
   document.querySelectorAll('.nav-item').forEach((btn) => {
@@ -1298,21 +1568,26 @@ function bindEvents() {
     });
   });
 
-  // 行程表單互動（變更開始日期時若結束日期較早則自動跟上）
+  // 行程表單互動（開始日期連動＋新增標籤按鈕與 Enter 鍵）
   document.getElementById('ev-start-date').addEventListener('change', (e) => {
     const endInput = document.getElementById('ev-end-date');
     if (!endInput.value || endInput.value < e.target.value) {
       endInput.value = e.target.value;
     }
   });
-  document.getElementById('ev-tag-custom').addEventListener('input', (e) => {
-    if (e.target.value.trim()) {
-      document.querySelectorAll('#ev-tag-chips .tag-chip').forEach((c) => {
-        c.classList.remove('active');
-        c.style.backgroundColor = '';
-      });
-    }
-  });
+  const addTagBtn = document.getElementById('btn-add-tag');
+  const newTagInput = document.getElementById('ev-tag-new-input');
+  if (addTagBtn) {
+    addTagBtn.addEventListener('click', addTagsFromInput);
+  }
+  if (newTagInput) {
+    newTagInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        addTagsFromInput();
+      }
+    });
+  }
   document.getElementById('form-event').addEventListener('submit', handleSaveEvent);
   document.getElementById('btn-delete-event').addEventListener('click', handleDeleteEvent);
 
