@@ -165,16 +165,21 @@
 
       <!-- 關鍵字搜尋、年份月份跳轉與成員頭像篩選列 -->
       <section class="album-search-panel" aria-label="搜尋與篩選相簿">
-        <div class="search-input-wrap">
-          <i class="fa-solid fa-magnifying-glass search-icon"></i>
-          <input
-            id="album-search-input"
-            type="search"
-            placeholder="搜尋日記文字、地點或關聯行程..."
-            autocomplete="off"
-          />
-          <button id="btn-clear-search" class="search-clear-btn hidden" type="button" aria-label="清除搜尋文字">
-            <i class="fa-solid fa-circle-xmark"></i>
+        <div class="search-bar-row">
+          <div class="search-input-wrap">
+            <i class="fa-solid fa-magnifying-glass search-icon"></i>
+            <input
+              id="album-search-input"
+              type="search"
+              placeholder="搜尋日記文字、#標籤或關聯行程..."
+              autocomplete="off"
+            />
+            <button id="btn-clear-search" class="search-clear-btn hidden" type="button" aria-label="清除搜尋文字">
+              <i class="fa-solid fa-circle-xmark"></i>
+            </button>
+          </div>
+          <button id="btn-album-search" class="btn btn-primary search-submit-btn" type="button">
+            <i class="fa-solid fa-magnifying-glass"></i> 搜尋
           </button>
         </div>
 
