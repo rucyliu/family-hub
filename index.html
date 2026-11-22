@@ -110,16 +110,6 @@
 
         <!-- 時間軸視圖 -->
         <div id="cal-timeline-view" class="timeline-view hidden">
-          <div class="timeline-mode-bar">
-            <label class="switch-label" for="chk-timeline-14days">
-              <span class="switch-control">
-                <input id="chk-timeline-14days" type="checkbox" />
-                <span class="switch-slider"></span>
-              </span>
-              <span class="switch-text">跨月顯示未來 14 天</span>
-            </label>
-            <span id="timeline-14-range" class="timeline-range-badge hidden"></span>
-          </div>
           <div id="cal-timeline-list" class="timeline-list"></div>
         </div>
       </section>
@@ -150,10 +140,16 @@
         </div>
       </section>
 
-      <!-- 右下角浮動新增按鈕 -->
-      <button id="fab-add-event" class="fab" type="button" aria-label="新增行程">
-        <i class="fa-solid fa-plus"></i>
-      </button>
+      <!-- 右下角浮動按鈕群組（今日定位鈕僅於時間軸視圖顯示） -->
+      <div class="fab-group">
+        <button id="fab-scroll-today" class="fab fab-secondary hidden" type="button" title="跳至今日位置" aria-label="跳至今日位置">
+          <i class="fa-solid fa-calendar-day"></i>
+          <span>今日</span>
+        </button>
+        <button id="fab-add-event" class="fab" type="button" title="新增行程" aria-label="新增行程">
+          <i class="fa-solid fa-plus"></i>
+        </button>
+      </div>
     </main>
 
     <!-- 分頁 2：生活相簿 -->
