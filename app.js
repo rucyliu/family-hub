@@ -30,6 +30,7 @@ const state = {
 
   // 行事曆狀態
   calendarViewMode: 'month', // 'month' | 'timeline'
+  timelinePastExpanded: false, // 新增：時間軸過去行程是否展開
   viewYear: nowDate.getFullYear(),
   viewMonth: nowDate.getMonth() + 1,
   selectedDate: toDateStr(nowDate),
@@ -331,6 +332,9 @@ function renderCalendarCurrentView() {
 // 分頁 1：行事曆（月曆視圖＋時間軸視圖＋多標籤篩選）
 // ============================================================================
 async function loadCalendarMonth(year, month) {
+  if (year !== state.viewYear || month !== state.viewMonth) {
+    state.timelinePastExpanded = false;
+  }
   state.viewYear = year;
   state.viewMonth = month;
   document.getElementById('cal-month-label').textContent = `${year} 年 ${month} 月`;
@@ -510,7 +514,7 @@ function renderCalendarGrid() {
 }
 
 /**
- * 時間軸視圖：依日期分組展開當月所有行程（含完整標題、標籤與換行內容）
+ * 時間軸視圖：當月預設摺疊「已結束的過去行程」，讓今天與未來行程置頂優先顯示
  */
 function renderCalendarTimeline() {
   const listEl = document.getElementById('cal-timeline-list');
@@ -546,59 +550,143 @@ function renderCalendarTimeline() {
     return;
   }
 
-  // 依 start_date 分組
-  const groups = new Map();
+  const now = new Date();
+  const todayStr = toDateStr(now);
+  const isEntirePastMonth =
+    state.viewYear < now.getFullYear() ||
+    (state.viewYear === now.getFullYear() && state.viewMonth < now.getMonth() + 1);
+
+  // 若切換去瀏覽過去的月份，直接全部展開方便回顧
+  if (isEntirePastMonth) {
+    const allGroups = groupEventsByStartDate(filteredEvents);
+    allGroups.forEach((events, dateStr) => {
+      listEl.appendChild(buildTimelineDayGroupElement(dateStr, events, todayStr, false));
+    });
+    return;
+  }
+
+  // 當月／未來月：區分「已結束的過去行程」與「進行中／今天之後的行程」
+  const pastEvents = [];
+  const upcomingEvents = [];
   filteredEvents.forEach((ev) => {
+    const endDate = ev.end_date || ev.start_date;
+    if (endDate < todayStr) {
+      pastEvents.push(ev);
+    } else {
+      upcomingEvents.push(ev);
+    }
+  });
+
+  // 1. 過去行程摺疊區塊
+  if (pastEvents.length > 0) {
+    const pastGroups = groupEventsByStartDate(pastEvents);
+    const pastSection = document.createElement('div');
+    pastSection.className = 'timeline-past-section' + (state.timelinePastExpanded ? ' expanded' : '');
+
+    const toggleBtn = document.createElement('button');
+    toggleBtn.type = 'button';
+    toggleBtn.className = 'timeline-past-toggle';
+    toggleBtn.setAttribute('aria-expanded', String(state.timelinePastExpanded));
+    toggleBtn.innerHTML =
+      `<span class="timeline-past-title">` +
+        `<i class="fa-solid fa-clock-rotate-left"></i>` +
+        `<span>已過去的行程（${pastGroups.size} 天・${pastEvents.length} 筆）</span>` +
+      `</span>` +
+      `<span class="timeline-past-action">` +
+        `<span>${state.timelinePastExpanded ? '收合' : '展開'}</span>` +
+        `<i class="fa-solid ${state.timelinePastExpanded ? 'fa-chevron-up' : 'fa-chevron-down'}"></i>` +
+      `</span>`;
+
+    toggleBtn.addEventListener('click', () => {
+      state.timelinePastExpanded = !state.timelinePastExpanded;
+      renderCalendarTimeline();
+    });
+    pastSection.appendChild(toggleBtn);
+
+    const pastBody = document.createElement('div');
+    pastBody.className = 'timeline-past-body' + (state.timelinePastExpanded ? '' : ' hidden');
+    pastGroups.forEach((events, dateStr) => {
+      pastBody.appendChild(buildTimelineDayGroupElement(dateStr, events, todayStr, true));
+    });
+    pastSection.appendChild(pastBody);
+
+    listEl.appendChild(pastSection);
+  }
+
+  // 2. 今天與接下來的行程（預設直接顯示）
+  if (upcomingEvents.length === 0) {
+    const emptyUpcoming = document.createElement('div');
+    emptyUpcoming.className = 'empty-hint';
+    emptyUpcoming.textContent = '本月今天之後尚無安排行程';
+    listEl.appendChild(emptyUpcoming);
+  } else {
+    const upcomingGroups = groupEventsByStartDate(upcomingEvents);
+    upcomingGroups.forEach((events, dateStr) => {
+      listEl.appendChild(buildTimelineDayGroupElement(dateStr, events, todayStr, false));
+    });
+  }
+}
+
+function groupEventsByStartDate(events) {
+  const groups = new Map();
+  events.forEach((ev) => {
     const key = ev.start_date;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(ev);
   });
+  return groups;
+}
 
-  const todayStr = toDateStr(new Date());
+function buildTimelineDayGroupElement(dateStr, events, todayStr, isPastGroup) {
+  const groupEl = document.createElement('div');
+  groupEl.className = 'timeline-day-group' + (isPastGroup ? ' is-past' : '');
 
-  groups.forEach((events, dateStr) => {
-    const groupEl = document.createElement('div');
-    groupEl.className = 'timeline-day-group';
+  const dateCol = document.createElement('div');
+  dateCol.className = 'timeline-date-col' + (dateStr === todayStr ? ' is-today' : '');
 
-    const dateCol = document.createElement('div');
-    dateCol.className = 'timeline-date-col' + (dateStr === todayStr ? ' is-today' : '');
+  const md = document.createElement('div');
+  md.className = 'timeline-date-md';
+  md.textContent = dateStr.slice(5).replace('-', '/');
+  dateCol.appendChild(md);
 
-    const md = document.createElement('div');
-    md.className = 'timeline-date-md';
-    md.textContent = dateStr.slice(5).replace('-', '/');
-    dateCol.appendChild(md);
+  const wk = document.createElement('div');
+  wk.className = 'timeline-date-wk';
+  wk.textContent = getWeekdayShort(dateStr);
+  dateCol.appendChild(wk);
 
-    const wk = document.createElement('div');
-    wk.className = 'timeline-date-wk';
-    wk.textContent = getWeekdayShort(dateStr);
-    dateCol.appendChild(wk);
+  // 跨日行程若開始日早於今天但仍在進行中，加上「進行中」小標記
+  if (!isPastGroup && dateStr < todayStr) {
+    const ongoing = document.createElement('div');
+    ongoing.className = 'timeline-ongoing-badge';
+    ongoing.textContent = '進行中';
+    dateCol.appendChild(ongoing);
+  }
 
-    if (state.photoDates.has(dateStr)) {
-      const camBtn = document.createElement('button');
-      camBtn.type = 'button';
-      camBtn.className = 'timeline-day-cam';
-      camBtn.title = '查看當日生活相簿';
-      camBtn.innerHTML = '<i class="fa-solid fa-camera"></i>';
-      camBtn.addEventListener('click', () => {
-        jumpToAlbumFilter({
-          type: 'date',
-          value: dateStr,
-          label: `當日相簿：${dateStr}`,
-        });
+  if (state.photoDates.has(dateStr)) {
+    const camBtn = document.createElement('button');
+    camBtn.type = 'button';
+    camBtn.className = 'timeline-day-cam';
+    camBtn.title = '查看當日生活相簿';
+    camBtn.innerHTML = '<i class="fa-solid fa-camera"></i>';
+    camBtn.addEventListener('click', () => {
+      jumpToAlbumFilter({
+        type: 'date',
+        value: dateStr,
+        label: `當日相簿：${dateStr}`,
       });
-      dateCol.appendChild(camBtn);
-    }
-
-    const eventsCol = document.createElement('div');
-    eventsCol.className = 'timeline-events-col';
-    events.forEach((ev) => {
-      eventsCol.appendChild(buildEventCardElement(ev));
     });
+    dateCol.appendChild(camBtn);
+  }
 
-    groupEl.appendChild(dateCol);
-    groupEl.appendChild(eventsCol);
-    listEl.appendChild(groupEl);
+  const eventsCol = document.createElement('div');
+  eventsCol.className = 'timeline-events-col';
+  events.forEach((ev) => {
+    eventsCol.appendChild(buildEventCardElement(ev));
   });
+
+  groupEl.appendChild(dateCol);
+  groupEl.appendChild(eventsCol);
+  return groupEl;
 }
 
 function getEventsForDate(dateStr) {
