@@ -84,17 +84,33 @@
               <i class="fa-solid fa-chevron-right"></i>
             </button>
           </div>
-          <button id="btn-today" class="btn btn-outline btn-sm" type="button">今天</button>
+          <div class="cal-toolbar-right">
+            <div class="view-toggle" role="group" aria-label="切換行事曆視圖">
+              <button id="btn-view-month" class="view-toggle-btn active" type="button">
+                <i class="fa-solid fa-table-cells"></i> 月曆
+              </button>
+              <button id="btn-view-timeline" class="view-toggle-btn" type="button">
+                <i class="fa-solid fa-bars-staggered"></i> 時間軸
+              </button>
+            </div>
+            <button id="btn-today" class="btn btn-outline btn-sm" type="button">今天</button>
+          </div>
         </div>
 
-        <!-- 依標籤快速篩選列 -->
         <div id="cal-tag-filter" class="cal-tag-filter" aria-label="依標籤篩選行程"></div>
 
-        <div class="cal-weekdays">
-          <span class="sun">日</span><span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span class="sat">六</span>
+        <!-- 月曆格子視圖 -->
+        <div id="cal-month-view">
+          <div class="cal-weekdays">
+            <span class="sun">日</span><span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span class="sat">六</span>
+          </div>
+          <div id="cal-grid" class="cal-grid"></div>
         </div>
 
-        <div id="cal-grid" class="cal-grid"></div>
+        <!-- 時間軸視圖 -->
+        <div id="cal-timeline-view" class="timeline-view hidden">
+          <div id="cal-timeline-list" class="timeline-list"></div>
+        </div>
       </section>
 
       <!-- 選中日期的行程與當日相簿縮圖 -->
@@ -280,7 +296,12 @@
         </div>
 
         <div class="form-group">
-          <label>已收錄照片 / 影片（點擊垃圾桶可單獨移除）</label>
+          <div class="label-with-action">
+            <label>已收錄照片 / 影片（可單獨移至別篇或刪除）</label>
+            <button id="btn-open-merge-post" class="btn btn-outline btn-xs" type="button">
+              <i class="fa-solid fa-object-group"></i> 合併整篇至別篇
+            </button>
+          </div>
           <div id="post-edit-media-grid" class="edit-media-grid"></div>
         </div>
 
@@ -359,6 +380,45 @@
           </div>
         </div>
       </div>
+    </div>
+  </div>
+
+  <!-- 彈窗 6：合併照片／影片至另一篇相簿 -->
+  <div id="modal-merge" class="modal-backdrop hidden" role="dialog" aria-modal="true">
+    <div class="modal-sheet modal-sm">
+      <div class="modal-header">
+        <h3 id="modal-merge-title">合併至其他相簿</h3>
+        <button class="icon-btn modal-close" data-close="modal-merge" type="button" aria-label="關閉">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+      </div>
+      <form id="form-merge" class="modal-body">
+        <p id="merge-desc" class="merge-desc"></p>
+
+        <div class="form-group">
+          <label for="merge-target-select">選擇要併入的目標相簿 <span class="req">*</span></label>
+          <select id="merge-target-select" required>
+            <option value="">載入相簿清單中...</option>
+          </select>
+        </div>
+
+        <div id="merge-caption-wrap" class="form-group">
+          <label class="checkbox-inline">
+            <input id="chk-merge-caption" type="checkbox" checked />
+            <span>一併將這篇的文字說明附加到目標相簿</span>
+          </label>
+        </div>
+
+        <div class="modal-footer">
+          <div></div>
+          <div class="footer-right">
+            <button class="btn btn-outline modal-close" data-close="modal-merge" type="button">取消</button>
+            <button id="btn-confirm-merge" class="btn btn-primary" type="submit">
+              <i class="fa-solid fa-check"></i> 確定合併
+            </button>
+          </div>
+        </div>
+      </form>
     </div>
   </div>
 
