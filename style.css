@@ -1516,3 +1516,68 @@ body {
 .checkbox-inline input[type="checkbox"] {
   width: auto;
 }
+
+/* ===== 時間軸：過去行程摺疊區塊 ===== */
+.timeline-past-section {
+  border: 1px dashed #cbd5e1;
+  border-radius: 12px;
+  background: #f8fafc;
+  padding: 6px;
+}
+
+.timeline-past-toggle {
+  width: 100%;
+  border: none;
+  background: transparent;
+  padding: 6px 8px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.timeline-past-toggle:hover {
+  background: #eff6ff;
+  color: var(--primary);
+}
+
+.timeline-past-title,
+.timeline-past-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.timeline-past-action {
+  font-size: 12px;
+  color: var(--primary);
+}
+
+.timeline-past-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 8px;
+  padding: 10px 4px 4px;
+  border-top: 1px dashed var(--border);
+}
+
+.timeline-day-group.is-past {
+  opacity: 0.78;
+}
+
+.timeline-ongoing-badge {
+  margin-top: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  color: #059669;
+  background: #dcfce7;
+  border-radius: 999px;
+  padding: 1px 4px;
+}
