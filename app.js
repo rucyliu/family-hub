@@ -946,7 +946,11 @@ function buildTimelineDayGroupElement(dateStr, events, todayStr, isPastGroup, th
   wk.textContent = getWeekdayShort(dateStr);
   dateCol.appendChild(wk);
 
-  if (!isPastGroup && dateStr < todayStr && events.length > 0) {
+  const hasOngoingEvent = dateStr < todayStr && events.some((ev) => {
+    const endDate = ev.end_date || ev.start_date;
+    return endDate >= todayStr;
+  });
+  if (hasOngoingEvent) {
     const ongoing = document.createElement('div');
     ongoing.className = 'timeline-ongoing-badge';
     ongoing.textContent = '進行中';
