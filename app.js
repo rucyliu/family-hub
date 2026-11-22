@@ -1159,16 +1159,14 @@ function renderAlbumList() {
     const actionsWrap = document.createElement('div');
     actionsWrap.className = 'post-header-actions';
 
-    // 只要 LIFF 支援 shareTargetPicker 即顯示分享按鈕
-    if (state.canSharePicker) {
-      const shareBtn = document.createElement('button');
-      shareBtn.type = 'button';
-      shareBtn.className = 'icon-btn share-btn';
-      shareBtn.title = '分享相簿卡片到 LINE 群組或好友';
-      shareBtn.innerHTML = '<i class="fa-regular fa-paper-plane"></i>';
-      shareBtn.addEventListener('click', () => handleSharePost(post));
-      actionsWrap.appendChild(shareBtn);
-    }
+    // 顯示分享按鈕
+    const shareBtn = document.createElement('button');
+    shareBtn.type = 'button';
+    shareBtn.className = 'icon-btn share-btn';
+    shareBtn.title = '分享相簿卡片到 LINE 群組或好友';
+    shareBtn.innerHTML = '<i class="fa-regular fa-paper-plane"></i>';
+    shareBtn.addEventListener('click', () => handleSharePost(post));
+    actionsWrap.appendChild(shareBtn);
 
     const editBtn = document.createElement('button');
     editBtn.type = 'button';
