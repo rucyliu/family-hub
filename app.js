@@ -1256,7 +1256,7 @@ async function handleSharePost(post) {
 
 function buildLiffPostUrl(postId) {
   const id = String(CONFIG.LIFF_ID || '').trim();
-  return `https://liff.line.me/${encodeURIComponent(id)}?tab=album&postId=${encodeURIComponent(postId)}`;
+  return 'https://liff.line.me/' + encodeURIComponent(id) + '?tab=album&postId=' + encodeURIComponent(postId);
 }
 
 /**
@@ -1860,11 +1860,11 @@ function getEventDisplayLabel(ev) {
 }
 
 function getDriveThumbUrl(fileId, width) {
-  return `[https://drive.google.com/thumbnail?id=$](https://drive.google.com/thumbnail?id=$){encodeURIComponent(fileId)}&sz=w${width}`;
+  return 'https://drive.google.com/thumbnail?id=' + encodeURIComponent(fileId) + '&sz=w' + width;
 }
 
 function getDriveViewUrl(fileId) {
-  return `[https://drive.google.com/file/d/$](https://drive.google.com/file/d/$){encodeURIComponent(fileId)}/view`;
+  return 'https://drive.google.com/file/d/' + encodeURIComponent(fileId) + '/view';
 }
 
 function toDateStr(d) {
