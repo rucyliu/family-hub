@@ -1,6 +1,5 @@
 /**
- * 家庭行事曆與生活相簿前端主程式（全修正整合版）
- * 請將以下兩組設定替換為你自己的 LIFF ID 與 GAS 部署網址 (/exec)
+ * 家庭行事曆與生活相簿前端主程式（時間軸＋相簿合併＋群組分享全功能版）
  */
 const CONFIG = {
   LIFF_ID: '2012740107-BWMenJbV',
@@ -8,7 +7,6 @@ const CONFIG = {
   PAGE_SIZE: 20,
 };
 
-// 高對比自動標籤調色盤（同標籤透過雜湊永遠固定對應同一色碼）
 const TAG_COLOR_PALETTE = [
   '#2563eb', '#059669', '#d97706', '#7c3aed',
   '#dc2626', '#0891b2', '#db2777', '#4f46e5',
@@ -26,16 +24,21 @@ const state = {
   idToken: '',
   user: null,
   usersMap: {},
+  features: {
+    groupShareEnabled: false,
+    groupSharedToday: false,
+  },
   currentTab: 'calendar',
   isReloggingIn: false,
 
   // 行事曆狀態
+  calendarViewMode: 'month', // 'month' | 'timeline'
   viewYear: nowDate.getFullYear(),
   viewMonth: nowDate.getMonth() + 1,
   selectedDate: toDateStr(nowDate),
   selectedTagFilter: '',
-  existingTags: [],      // 整份試算表目前已存在的標籤清單
-  modalSelectedTags: [], // 行程編輯彈窗中已勾選的多選標籤（依順序，第 1 個決定月曆底色）
+  existingTags: [],
+  modalSelectedTags: [],
   monthEvents: [],
   photoDates: new Set(),
   dayThumbnails: {},
@@ -51,14 +54,15 @@ const state = {
   albumTotal: 0,
   albumReqSeq: 0,
 
-  // 編輯與燈箱暫存
+  // 編輯、合併與燈箱暫存
   editingPost: null,
+  mergeContext: null, // { sourcePostId, mediaId }
   lightboxOriginalUrl: '',
   confirmResolver: null,
 };
 
 // ============================================================================
-// 初始化、LIFF 登入與 PC 過期憑證自動重登機制
+// 初始化、LIFF 登入與 PC 過期憑證自動重登
 // ============================================================================
 document.addEventListener('DOMContentLoaded', () => {
   bindEvents();
@@ -80,7 +84,6 @@ async function initApp() {
       throw new Error('無法取得 LINE ID Token，請確認 LIFF Scopes 已勾選 openid。');
     }
 
-    // 啟動時即檢查 id_token 是否已過期（PC 久置重開常見情境）
     if (isIdTokenExpired(state.idToken)) {
       const triggered = triggerRelogin(false);
       if (triggered) return;
@@ -117,31 +120,45 @@ async function verifyMemberAndBoot() {
     throw new Error(res.message || '驗證失敗');
   }
 
-  // 成功登入後清除重登冷卻紀錄
   try { sessionStorage.removeItem(RELOGIN_COOLDOWN_KEY); } catch (_) {}
 
   state.user = res.data.user;
   state.usersMap = res.data.usersMap || {};
+  state.features = Object.assign(
+    { groupShareEnabled: false, groupSharedToday: false },
+    res.data.features || {}
+  );
+
   renderHeaderProfile();
   renderAlbumMemberFilter();
   showScreen('app');
 
+  // 支援網址參數：?tab=album&editPost=xxx 或 ?tab=album&postId=xxx
   const params = new URLSearchParams(window.location.search);
   const initTab = params.get('tab') === 'album' ? 'album' : 'calendar';
   const editPostId = params.get('editPost');
+  const focusPostId = params.get('postId');
 
-  await switchTab(initTab);
+  if (focusPostId) {
+    await jumpToAlbumFilter({
+      type: 'post',
+      value: focusPostId,
+      label: '指定分享相簿',
+    });
+  } else {
+    await switchTab(initTab);
+  }
 
   if (editPostId) {
     await openAlbumEditById(editPostId);
+  }
+
+  if (editPostId || focusPostId) {
     const cleanUrl = window.location.origin + window.location.pathname;
     window.history.replaceState({}, '', cleanUrl);
   }
 }
 
-/**
- * 解析 JWT payload 檢查 id_token 是否已過期（提前 60 秒視為過期）
- */
 function isIdTokenExpired(token) {
   if (!token) return true;
   try {
@@ -165,16 +182,12 @@ function isIdTokenExpired(token) {
   }
 }
 
-/**
- * 清除舊憑證並重新導向 LINE 登入（manual=true 時忽略冷卻保護）
- */
 function triggerRelogin(manual = false) {
   if (state.isReloggingIn) return true;
 
   if (!manual) {
     try {
       const lastTs = Number(sessionStorage.getItem(RELOGIN_COOLDOWN_KEY) || '0');
-      // 15 秒內若已自動重登過仍失敗，停止自動跳轉避免無限迴圈，改由使用者手動點擊
       if (lastTs && Date.now() - lastTs < 15000) {
         return false;
       }
@@ -188,13 +201,10 @@ function triggerRelogin(manual = false) {
   try {
     if (typeof liff !== 'undefined') {
       if (!liff.isInClient()) {
-        if (liff.isLoggedIn()) {
-          liff.logout();
-        }
+        if (liff.isLoggedIn()) liff.logout();
         liff.login({ redirectUri: window.location.href });
         return true;
       }
-      // 手機 LINE App 內建瀏覽器直接重載即可向 LINE Client 取新 Token
       window.location.reload();
       return true;
     }
@@ -207,7 +217,7 @@ function triggerRelogin(manual = false) {
 }
 
 // ============================================================================
-// API 呼叫（自動攔截過期憑證）
+// API 呼叫
 // ============================================================================
 async function apiCall(action, payload = {}) {
   if (isIdTokenExpired(state.idToken)) {
@@ -240,7 +250,7 @@ async function apiCall(action, payload = {}) {
 }
 
 // ============================================================================
-// 分頁切換與畫面顯示
+// 分頁與介面狀態切換
 // ============================================================================
 function showScreen(name, message) {
   document.getElementById('screen-loading').classList.toggle('hidden', name !== 'loading');
@@ -294,8 +304,37 @@ async function switchTab(tab) {
   }
 }
 
+function setCalendarViewMode(mode) {
+  state.calendarViewMode = mode;
+  const isMonth = mode === 'month';
+
+  const btnMonth = document.getElementById('btn-view-month');
+  const btnTimeline = document.getElementById('btn-view-timeline');
+  if (btnMonth) btnMonth.classList.toggle('active', isMonth);
+  if (btnTimeline) btnTimeline.classList.toggle('active', !isMonth);
+
+  const monthWrap = document.getElementById('cal-month-view');
+  const timelineWrap = document.getElementById('cal-timeline-view');
+  const dayPanel = document.querySelector('.day-panel');
+
+  if (monthWrap) monthWrap.classList.toggle('hidden', !isMonth);
+  if (timelineWrap) timelineWrap.classList.toggle('hidden', isMonth);
+  if (dayPanel) dayPanel.classList.toggle('hidden', !isMonth);
+
+  renderCalendarCurrentView();
+}
+
+function renderCalendarCurrentView() {
+  if (state.calendarViewMode === 'timeline') {
+    renderCalendarTimeline();
+  } else {
+    renderCalendarGrid();
+    renderSelectedDayPanel();
+  }
+}
+
 // ============================================================================
-// 分頁 1：行事曆邏輯與多標籤篩選
+// 分頁 1：行事曆（月曆視圖＋時間軸視圖＋多標籤篩選）
 // ============================================================================
 async function loadCalendarMonth(year, month) {
   state.viewYear = year;
@@ -318,8 +357,7 @@ async function loadCalendarMonth(year, month) {
     state.dayThumbnails = res.data.dayThumbnails || {};
 
     renderCalendarTagFilter();
-    renderCalendarGrid();
-    renderSelectedDayPanel();
+    renderCalendarCurrentView();
   } catch (err) {
     showToast('無法連線取得行程資料', 'error');
   }
@@ -339,12 +377,10 @@ function renderCalendarTagFilter() {
     });
   });
 
-  // 確保切換月份後若目前仍有篩選中的標籤，仍保留於篩選列方便解除
   if (state.selectedTagFilter && !counts[state.selectedTagFilter]) {
     monthTagOrder.push(state.selectedTagFilter);
   }
 
-  // 若本月無標籤但全表已有標籤，顯示全表標籤方便快速查看
   const displayTags = monthTagOrder.length > 0 ? monthTagOrder : state.existingTags;
 
   bar.appendChild(
@@ -392,8 +428,7 @@ function createFilterChip(value, label, color, count, isActive) {
   btn.addEventListener('click', () => {
     state.selectedTagFilter = (state.selectedTagFilter === value) ? '' : value;
     renderCalendarTagFilter();
-    renderCalendarGrid();
-    renderSelectedDayPanel();
+    renderCalendarCurrentView();
   });
 
   return btn;
@@ -451,7 +486,6 @@ function renderCalendarGrid() {
     }
     cell.appendChild(topRow);
 
-    // 單日所有行程項目全部顯示（底色取第一個標籤顏色，文字優先標題、無標題顯示標籤）
     const dayEvents = getEventsForDate(dateStr);
     if (dayEvents.length > 0) {
       const bars = document.createElement('div');
@@ -481,6 +515,98 @@ function renderCalendarGrid() {
   }
 }
 
+/**
+ * 時間軸視圖：依日期分組展開當月所有行程（含完整標題、標籤與換行內容）
+ */
+function renderCalendarTimeline() {
+  const listEl = document.getElementById('cal-timeline-list');
+  if (!listEl) return;
+  listEl.innerHTML = '';
+
+  const filteredEvents = state.monthEvents.filter((ev) => {
+    if (!state.selectedTagFilter) return true;
+    const tags = parseTags(ev.tags !== undefined ? ev.tags : ev.tag);
+    return tags.includes(state.selectedTagFilter);
+  });
+
+  if (filteredEvents.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'empty-hint';
+    if (state.selectedTagFilter) {
+      empty.textContent = `本月沒有「${state.selectedTagFilter}」相關行程`;
+      const clearBtn = document.createElement('button');
+      clearBtn.type = 'button';
+      clearBtn.className = 'link-btn';
+      clearBtn.style.marginLeft = '6px';
+      clearBtn.textContent = '顯示全部';
+      clearBtn.addEventListener('click', () => {
+        state.selectedTagFilter = '';
+        renderCalendarTagFilter();
+        renderCalendarCurrentView();
+      });
+      empty.appendChild(clearBtn);
+    } else {
+      empty.textContent = `${state.viewYear} 年 ${state.viewMonth} 月還沒有安排行程`;
+    }
+    listEl.appendChild(empty);
+    return;
+  }
+
+  // 依 start_date 分組
+  const groups = new Map();
+  filteredEvents.forEach((ev) => {
+    const key = ev.start_date;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(ev);
+  });
+
+  const todayStr = toDateStr(new Date());
+
+  groups.forEach((events, dateStr) => {
+    const groupEl = document.createElement('div');
+    groupEl.className = 'timeline-day-group';
+
+    const dateCol = document.createElement('div');
+    dateCol.className = 'timeline-date-col' + (dateStr === todayStr ? ' is-today' : '');
+
+    const md = document.createElement('div');
+    md.className = 'timeline-date-md';
+    md.textContent = dateStr.slice(5).replace('-', '/');
+    dateCol.appendChild(md);
+
+    const wk = document.createElement('div');
+    wk.className = 'timeline-date-wk';
+    wk.textContent = getWeekdayShort(dateStr);
+    dateCol.appendChild(wk);
+
+    if (state.photoDates.has(dateStr)) {
+      const camBtn = document.createElement('button');
+      camBtn.type = 'button';
+      camBtn.className = 'timeline-day-cam';
+      camBtn.title = '查看當日生活相簿';
+      camBtn.innerHTML = '<i class="fa-solid fa-camera"></i>';
+      camBtn.addEventListener('click', () => {
+        jumpToAlbumFilter({
+          type: 'date',
+          value: dateStr,
+          label: `當日相簿：${dateStr}`,
+        });
+      });
+      dateCol.appendChild(camBtn);
+    }
+
+    const eventsCol = document.createElement('div');
+    eventsCol.className = 'timeline-events-col';
+    events.forEach((ev) => {
+      eventsCol.appendChild(buildEventCardElement(ev));
+    });
+
+    groupEl.appendChild(dateCol);
+    groupEl.appendChild(eventsCol);
+    listEl.appendChild(groupEl);
+  });
+}
+
 function getEventsForDate(dateStr) {
   return state.monthEvents.filter((ev) => {
     const end = ev.end_date || ev.start_date;
@@ -492,6 +618,76 @@ function getEventsForDate(dateStr) {
     }
     return true;
   });
+}
+
+function buildEventCardElement(ev) {
+  const tags = parseTags(ev.tags !== undefined ? ev.tags : ev.tag);
+  const primaryColor = getEventPrimaryColor(ev);
+  const card = document.createElement('div');
+  card.className = 'event-card';
+  card.style.borderLeftColor = primaryColor;
+
+  const top = document.createElement('div');
+  top.className = 'event-card-top';
+
+  const badges = document.createElement('div');
+  badges.className = 'event-badges';
+
+  tags.forEach((t) => {
+    const tagBadge = document.createElement('span');
+    tagBadge.className = 'tag-badge';
+    tagBadge.style.backgroundColor = getTagColor(t);
+    tagBadge.textContent = t;
+    badges.appendChild(tagBadge);
+  });
+
+  const timeBadge = document.createElement('span');
+  timeBadge.className = 'time-badge';
+  const rangeText = ev.end_date && ev.end_date !== ev.start_date
+    ? `${ev.start_date.slice(5)} 至 ${ev.end_date.slice(5)}`
+    : (ev.start_time ? ev.start_time : '全天');
+  timeBadge.textContent = rangeText;
+  badges.appendChild(timeBadge);
+
+  const editIcon = document.createElement('i');
+  editIcon.className = 'fa-regular fa-pen-to-square muted';
+  top.appendChild(badges);
+  top.appendChild(editIcon);
+  card.appendChild(top);
+
+  const title = document.createElement('div');
+  title.className = 'event-title';
+  title.textContent = getEventDisplayLabel(ev);
+  card.appendChild(title);
+
+  if (ev.content) {
+    const content = document.createElement('p');
+    content.className = 'event-content';
+    content.textContent = ev.content;
+    card.appendChild(content);
+  }
+
+  if (ev.linked_media_count > 0) {
+    const pill = document.createElement('button');
+    pill.type = 'button';
+    pill.className = 'event-linked-pill';
+    pill.innerHTML = '<i class="fa-regular fa-images"></i>';
+    const span = document.createElement('span');
+    span.textContent = `關聯相簿（${ev.linked_media_count} 則媒體）`;
+    pill.appendChild(span);
+    pill.addEventListener('click', (e) => {
+      e.stopPropagation();
+      jumpToAlbumFilter({
+        type: 'event',
+        value: ev.event_id,
+        label: `行程相簿：${getEventDisplayLabel(ev)}`,
+      });
+    });
+    card.appendChild(pill);
+  }
+
+  card.addEventListener('click', () => openEventModal(ev));
+  return card;
 }
 
 function renderSelectedDayPanel() {
@@ -516,8 +712,7 @@ function renderSelectedDayPanel() {
       clearBtn.addEventListener('click', () => {
         state.selectedTagFilter = '';
         renderCalendarTagFilter();
-        renderCalendarGrid();
-        renderSelectedDayPanel();
+        renderCalendarCurrentView();
       });
       empty.appendChild(clearBtn);
     } else {
@@ -526,77 +721,10 @@ function renderSelectedDayPanel() {
     listEl.appendChild(empty);
   } else {
     dayEvents.forEach((ev) => {
-      const tags = parseTags(ev.tags !== undefined ? ev.tags : ev.tag);
-      const primaryColor = getEventPrimaryColor(ev);
-      const card = document.createElement('div');
-      card.className = 'event-card';
-      card.style.borderLeftColor = primaryColor;
-
-      const top = document.createElement('div');
-      top.className = 'event-card-top';
-
-      const badges = document.createElement('div');
-      badges.className = 'event-badges';
-
-      tags.forEach((t) => {
-        const tagBadge = document.createElement('span');
-        tagBadge.className = 'tag-badge';
-        tagBadge.style.backgroundColor = getTagColor(t);
-        tagBadge.textContent = t;
-        badges.appendChild(tagBadge);
-      });
-
-      const timeBadge = document.createElement('span');
-      timeBadge.className = 'time-badge';
-      const rangeText = ev.end_date && ev.end_date !== ev.start_date
-        ? `${ev.start_date.slice(5)} 至 ${ev.end_date.slice(5)}`
-        : (ev.start_time ? ev.start_time : '全天');
-      timeBadge.textContent = rangeText;
-      badges.appendChild(timeBadge);
-
-      const editIcon = document.createElement('i');
-      editIcon.className = 'fa-regular fa-pen-to-square muted';
-      top.appendChild(badges);
-      top.appendChild(editIcon);
-      card.appendChild(top);
-
-      const title = document.createElement('div');
-      title.className = 'event-title';
-      title.textContent = getEventDisplayLabel(ev);
-      card.appendChild(title);
-
-      if (ev.content) {
-        const content = document.createElement('p');
-        content.className = 'event-content';
-        content.textContent = ev.content;
-        card.appendChild(content);
-      }
-
-      if (ev.linked_media_count > 0) {
-        const pill = document.createElement('button');
-        pill.type = 'button';
-        pill.className = 'event-linked-pill';
-        pill.innerHTML = '<i class="fa-regular fa-images"></i>';
-        const span = document.createElement('span');
-        span.textContent = `關聯相簿（${ev.linked_media_count} 則媒體）`;
-        pill.appendChild(span);
-        pill.addEventListener('click', (e) => {
-          e.stopPropagation();
-          jumpToAlbumFilter({
-            type: 'event',
-            value: ev.event_id,
-            label: `行程相簿：${getEventDisplayLabel(ev)}`,
-          });
-        });
-        card.appendChild(pill);
-      }
-
-      card.addEventListener('click', () => openEventModal(ev));
-      listEl.appendChild(card);
+      listEl.appendChild(buildEventCardElement(ev));
     });
   }
 
-  // 當日生活相簿縮圖條
   const photosBox = document.getElementById('day-photos-section');
   const strip = document.getElementById('day-thumbs-strip');
   const thumbs = state.dayThumbnails[dateStr] || [];
@@ -623,7 +751,6 @@ function renderModalTagUI() {
   const chipsWrap = document.getElementById('ev-tag-chips');
   if (!selectedWrap || !chipsWrap) return;
 
-  // 1. 已選擇的標籤區（第 1 個決定月曆底色，點 X 可移除）
   selectedWrap.innerHTML = '';
   if (state.modalSelectedTags.length === 0) {
     const empty = document.createElement('span');
@@ -662,7 +789,6 @@ function renderModalTagUI() {
     });
   }
 
-  // 2. 既有標籤快選區（整份試算表既有標籤 + 本次編輯新增的標籤）
   chipsWrap.innerHTML = '';
   const allChoices = parseTags([...state.existingTags, ...state.modalSelectedTags]);
 
@@ -715,12 +841,8 @@ function addTagsFromInput() {
   if (newTags.length === 0) return;
 
   newTags.forEach((t) => {
-    if (!state.modalSelectedTags.includes(t)) {
-      state.modalSelectedTags.push(t);
-    }
-    if (!state.existingTags.includes(t)) {
-      state.existingTags.push(t);
-    }
+    if (!state.modalSelectedTags.includes(t)) state.modalSelectedTags.push(t);
+    if (!state.existingTags.includes(t)) state.existingTags.push(t);
   });
   input.value = '';
   renderModalTagUI();
@@ -763,7 +885,6 @@ function openEventModal(ev = null) {
 
 async function handleSaveEvent(e) {
   e.preventDefault();
-  // 若使用者輸入了新標籤文字但直接按儲存，先自動收進已選清單
   addTagsFromInput();
 
   const btn = document.getElementById('btn-save-event');
@@ -842,7 +963,7 @@ async function handleDeleteEvent() {
 }
 
 // ============================================================================
-// 分頁 2：生活相簿邏輯（含關鍵字搜尋與成員篩選）
+// 分頁 2：生活相簿（搜尋、成員篩選、分享群組通知、合併貼文）
 // ============================================================================
 function renderAlbumMemberFilter() {
   const bar = document.getElementById('album-member-filter');
@@ -949,6 +1070,9 @@ async function loadAlbumPosts(page = 1, append = false) {
     state.albumPage = res.data.page || page;
     state.albumTotal = Number(res.data.total || 0);
     state.albumHasMore = Boolean(res.data.hasMore);
+    if (typeof res.data.groupSharedToday === 'boolean') {
+      state.features.groupSharedToday = res.data.groupSharedToday;
+    }
     state.albumLoadedOnce = true;
 
     if (append) {
@@ -1041,15 +1165,32 @@ function renderAlbumList() {
     authorMeta.appendChild(dateEl);
     authorWrap.appendChild(authorMeta);
 
+    const actionsWrap = document.createElement('div');
+    actionsWrap.className = 'post-header-actions';
+
+    // 只有當管理員設定了 LINE_GROUP_ID 時才顯示發送群組通知按鈕
+    if (state.features.groupShareEnabled) {
+      const shareBtn = document.createElement('button');
+      shareBtn.type = 'button';
+      shareBtn.className = 'icon-btn share-btn' + (state.features.groupSharedToday ? ' shared-today' : '');
+      shareBtn.title = state.features.groupSharedToday
+        ? '今日已發送過群組相簿通知（每天限一次）'
+        : '發送相簿更新通知到家庭群組';
+      shareBtn.innerHTML = '<i class="fa-regular fa-paper-plane"></i>';
+      shareBtn.addEventListener('click', () => handleSharePostToGroup(post));
+      actionsWrap.appendChild(shareBtn);
+    }
+
     const editBtn = document.createElement('button');
     editBtn.type = 'button';
     editBtn.className = 'icon-btn';
-    editBtn.title = '編輯貼文與關聯行程';
+    editBtn.title = '編輯貼文、合併相簿與關聯行程';
     editBtn.innerHTML = '<i class="fa-regular fa-pen-to-square"></i>';
     editBtn.addEventListener('click', () => openAlbumEditModal(post));
+    actionsWrap.appendChild(editBtn);
 
     header.appendChild(authorWrap);
-    header.appendChild(editBtn);
+    header.appendChild(actionsWrap);
     card.appendChild(header);
 
     if (post.linked_event) {
@@ -1100,6 +1241,39 @@ function renderAlbumList() {
   loadMoreWrap.classList.toggle('hidden', !state.albumHasMore);
 }
 
+async function handleSharePostToGroup(post) {
+  if (state.features.groupSharedToday) {
+    showToast('今天已經發送過群組相簿通知囉（每天限發送一次）', 'info');
+    return;
+  }
+
+  const ok = await showConfirm(
+    '發送相簿通知到家庭群組',
+    `確定要將這篇「${post.post_date}」的生活相簿分享卡片發送到群組嗎？\n（全體成員每天限發送一次）`,
+    '確定發送',
+    false
+  );
+  if (!ok) return;
+
+  try {
+    const res = await apiCall('shareAlbumPostToGroup', { post_id: post.post_id });
+    if (!res.ok) {
+      if (res.code === 'DAILY_LIMIT_REACHED') {
+        state.features.groupSharedToday = true;
+        renderAlbumList();
+      }
+      if (res.code !== 'UNAUTHORIZED') showToast(res.message || '發送通知失敗', 'error');
+      return;
+    }
+
+    state.features.groupSharedToday = true;
+    renderAlbumList();
+    showToast('已發送相簿更新通知到家庭群組！', 'success');
+  } catch (err) {
+    showToast('網路錯誤，無法發送群組通知', 'error');
+  }
+}
+
 function appendMediaThumbElement(container, media, dateLabel) {
   const isVideo = media.media_type === 'video';
   const thumbId = isVideo ? (media.thumb_file_id || media.drive_file_id) : media.drive_file_id;
@@ -1127,19 +1301,14 @@ function appendMediaThumbElement(container, media, dateLabel) {
     overlay.className = 'video-overlay';
     overlay.innerHTML = '<div class="video-play-circle"><i class="fa-solid fa-play"></i></div><span class="video-tag">影片</span>';
     container.appendChild(overlay);
-
-    container.addEventListener('click', () => {
-      openExternalUrl(originalUrl);
-    });
+    container.addEventListener('click', () => openExternalUrl(originalUrl));
   } else {
-    container.addEventListener('click', () => {
-      openLightbox(media.drive_file_id, dateLabel);
-    });
+    container.addEventListener('click', () => openLightbox(media.drive_file_id, dateLabel));
   }
 }
 
 // ============================================================================
-// 相簿編輯彈窗
+// 相簿編輯彈窗與合併至另一篇相簿
 // ============================================================================
 async function openAlbumEditById(postId) {
   let target = state.albumPosts.find((p) => p.post_id === postId);
@@ -1219,6 +1388,14 @@ function renderEditPostMediaGrid() {
     img.alt = '縮圖';
     box.appendChild(img);
 
+    const moveBtn = document.createElement('button');
+    moveBtn.type = 'button';
+    moveBtn.className = 'edit-media-move';
+    moveBtn.title = '將此檔案移至另一篇相簿';
+    moveBtn.innerHTML = '<i class="fa-solid fa-right-left"></i>';
+    moveBtn.addEventListener('click', () => openMergeModal(state.editingPost.post_id, m.media_id));
+    box.appendChild(moveBtn);
+
     const delBtn = document.createElement('button');
     delBtn.type = 'button';
     delBtn.className = 'edit-media-del';
@@ -1229,6 +1406,89 @@ function renderEditPostMediaGrid() {
 
     grid.appendChild(box);
   });
+}
+
+async function openMergeModal(sourcePostId, mediaId = '') {
+  if (!sourcePostId) return;
+  state.mergeContext = { sourcePostId, mediaId };
+
+  const isSingle = Boolean(mediaId);
+  document.getElementById('modal-merge-title').textContent = isSingle ? '移動單筆媒體至別篇' : '合併整篇至其他相簿';
+  document.getElementById('merge-desc').textContent = isSingle
+    ? '將這張照片／影片移至另一篇相簿群組。若原本這篇已無剩餘照片或影片，將會自動移除空貼文。'
+    : '將本篇全部照片與影片併入另一篇相簿群組，完成後將自動移除原本這篇貼文。';
+  document.getElementById('merge-caption-wrap').classList.toggle('hidden', isSingle);
+  document.getElementById('chk-merge-caption').checked = true;
+
+  const select = document.getElementById('merge-target-select');
+  select.innerHTML = '<option value="">載入可合併的相簿中...</option>';
+  select.disabled = true;
+  openModal('modal-merge');
+
+  try {
+    const res = await apiCall('getAlbumMergeTargets', { excludePostId: sourcePostId });
+    const targets = (res.ok && res.data.targets) ? res.data.targets : [];
+    if (targets.length === 0) {
+      select.innerHTML = '<option value="">目前沒有其他相簿可供合併</option>';
+      return;
+    }
+
+    select.innerHTML = '<option value="">請選擇目標相簿...</option>';
+    targets.forEach((t) => {
+      const opt = document.createElement('option');
+      opt.value = t.post_id;
+      const snippet = t.caption
+        ? (t.caption.replace(/\s+/g, ' ').slice(0, 18) + (t.caption.length > 18 ? '…' : ''))
+        : `${t.author_name} 的相簿`;
+      opt.textContent = `${t.post_date}｜${t.media_count} 則｜${snippet}`;
+      select.appendChild(opt);
+    });
+    select.disabled = false;
+  } catch (err) {
+    select.innerHTML = '<option value="">載入失敗，請關閉重試</option>';
+  }
+}
+
+async function handleConfirmMerge(e) {
+  e.preventDefault();
+  if (!state.mergeContext) return;
+
+  const targetPostId = document.getElementById('merge-target-select').value;
+  if (!targetPostId) {
+    showToast('請先選擇要併入的目標相簿', 'error');
+    return;
+  }
+
+  const btn = document.getElementById('btn-confirm-merge');
+  btn.disabled = true;
+  try {
+    const res = await apiCall('mergeAlbumPosts', {
+      source_post_id: state.mergeContext.sourcePostId,
+      target_post_id: targetPostId,
+      media_id: state.mergeContext.mediaId || '',
+      merge_caption: document.getElementById('chk-merge-caption').checked,
+    });
+
+    if (!res.ok) {
+      if (res.code !== 'UNAUTHORIZED') showToast(res.message || '合併失敗', 'error');
+      return;
+    }
+
+    closeModal('modal-merge');
+    if (res.data.source_deleted || !state.mergeContext.mediaId) {
+      closeModal('modal-post');
+    } else if (state.editingPost) {
+      state.editingPost.media = state.editingPost.media.filter((m) => m.media_id !== state.mergeContext.mediaId);
+      renderEditPostMediaGrid();
+    }
+
+    showToast(`已成功合併 ${res.data.moved_count} 則照片／影片`, 'success');
+    await loadAlbumPosts(1, false);
+  } catch (err) {
+    showToast('合併過程發生網路錯誤', 'error');
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 async function handleSavePost(e) {
@@ -1308,7 +1568,7 @@ async function handleDeleteEntirePost() {
 }
 
 // ============================================================================
-// 大圖燈箱（修正關閉時誤觸 onerror 問題）與外部原檔開啟
+// 大圖燈箱與外部原檔開啟
 // ============================================================================
 function openLightbox(driveFileId, dateLabel) {
   state.lightboxOriginalUrl = getDriveViewUrl(driveFileId);
@@ -1317,7 +1577,6 @@ function openLightbox(driveFileId, dateLabel) {
   const img = document.getElementById('lightbox-img');
   const spinner = document.getElementById('lightbox-spinner');
 
-  // 先清除舊監聽再重設圖片
   img.onload = null;
   img.onerror = null;
   img.classList.add('hidden');
@@ -1329,7 +1588,6 @@ function openLightbox(driveFileId, dateLabel) {
     img.classList.remove('hidden');
   };
   img.onerror = () => {
-    // 若已關閉燈箱則忽略任何殘餘事件
     if (document.getElementById('modal-lightbox').classList.contains('hidden')) return;
     spinner.classList.add('hidden');
     showToast('預覽載入失敗，請直接點擊下方開啟原檔', 'error');
@@ -1341,7 +1599,6 @@ function openLightbox(driveFileId, dateLabel) {
 
 function closeLightbox() {
   const img = document.getElementById('lightbox-img');
-  // 務必先卸載 onload / onerror 再移除 src，避免觸發錯誤提示
   img.onload = null;
   img.onerror = null;
   img.removeAttribute('src');
@@ -1358,7 +1615,7 @@ function openExternalUrl(url) {
 }
 
 // ============================================================================
-// 暱稱編輯、自訂確認框、Toast 與標籤配色／文字工具
+// 暱稱、自訂確認框、Toast 與共用工具
 // ============================================================================
 async function handleSaveProfile(e) {
   e.preventDefault();
@@ -1398,11 +1655,14 @@ async function handleSaveProfile(e) {
   }
 }
 
-function showConfirm(title, message) {
+function showConfirm(title, message, okLabel = '確定刪除', isDanger = true) {
   return new Promise((resolve) => {
     state.confirmResolver = resolve;
     document.getElementById('confirm-title').textContent = title;
     document.getElementById('confirm-message').textContent = message;
+    const okBtn = document.getElementById('btn-confirm-ok');
+    okBtn.textContent = okLabel;
+    okBtn.className = isDanger ? 'btn btn-danger' : 'btn btn-primary';
     openModal('modal-confirm');
   });
 }
@@ -1464,9 +1724,6 @@ function parseTags(raw) {
   return out;
 }
 
-/**
- * 確定性 FNV-1a 雜湊：相同標籤永遠對應同一顏色
- */
 function getTagColor(tagName) {
   const s = String(tagName || '').trim();
   if (!s) return '#64748b';
@@ -1478,17 +1735,11 @@ function getTagColor(tagName) {
   return TAG_COLOR_PALETTE[(hash >>> 0) % TAG_COLOR_PALETTE.length];
 }
 
-/**
- * 月曆與卡片底色：使用第一個標籤的顏色，無標籤時退回中性灰
- */
 function getEventPrimaryColor(ev) {
   const tags = parseTags(ev.tags !== undefined ? ev.tags : ev.tag);
   return tags.length > 0 ? getTagColor(tags[0]) : '#64748b';
 }
 
-/**
- * 顯示文字：有填標題顯示標題，否則顯示標籤名稱
- */
 function getEventDisplayLabel(ev) {
   const title = String(ev.title || '').trim();
   if (title) return title;
@@ -1498,11 +1749,11 @@ function getEventDisplayLabel(ev) {
 }
 
 function getDriveThumbUrl(fileId, width) {
-  return `https://drive.google.com/thumbnail?id=${encodeURIComponent(fileId)}&sz=w${width}`;
+  return `[https://drive.google.com/thumbnail?id=$](https://drive.google.com/thumbnail?id=$){encodeURIComponent(fileId)}&sz=w${width}`;
 }
 
 function getDriveViewUrl(fileId) {
-  return `https://drive.google.com/file/d/${encodeURIComponent(fileId)}/view`;
+  return `[https://drive.google.com/file/d/$](https://drive.google.com/file/d/$){encodeURIComponent(fileId)}/view`;
 }
 
 function toDateStr(d) {
@@ -1518,29 +1769,36 @@ function getWeekdayLabel(dateStr) {
   return names[new Date(y, m - 1, d).getDay()];
 }
 
+function getWeekdayShort(dateStr) {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const names = ['週日', '週一', '週二', '週三', '週四', '週五', '週六'];
+  return names[new Date(y, m - 1, d).getDay()];
+}
+
 // ============================================================================
 // 全域事件綁定
 // ============================================================================
 function bindEvents() {
-  // 重試、重登與重整
   document.getElementById('btn-retry-auth').addEventListener('click', () => verifyMemberAndBoot());
   document.getElementById('btn-reload-app').addEventListener('click', () => window.location.reload());
   const reloginBtn = document.getElementById('btn-relogin-app');
-  if (reloginBtn) {
-    reloginBtn.addEventListener('click', () => triggerRelogin(true));
-  }
+  if (reloginBtn) reloginBtn.addEventListener('click', () => triggerRelogin(true));
 
-  // PC 久置後切回分頁時，自動檢查憑證是否已過期
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible' && state.user && isIdTokenExpired(state.idToken)) {
       triggerRelogin(false);
     }
   });
 
-  // 底部雙分頁
   document.querySelectorAll('.nav-item').forEach((btn) => {
     btn.addEventListener('click', () => switchTab(btn.dataset.tab));
   });
+
+  // 行事曆視圖切換（月曆 / 時間軸）
+  const btnViewMonth = document.getElementById('btn-view-month');
+  const btnViewTimeline = document.getElementById('btn-view-timeline');
+  if (btnViewMonth) btnViewMonth.addEventListener('click', () => setCalendarViewMode('month'));
+  if (btnViewTimeline) btnViewTimeline.addEventListener('click', () => setCalendarViewMode('timeline'));
 
   // 月份切換
   document.getElementById('btn-prev-month').addEventListener('click', () => {
@@ -1557,7 +1815,6 @@ function bindEvents() {
     loadCalendarMonth(now.getFullYear(), now.getMonth() + 1);
   });
 
-  // 新增行程與查看當日相簿
   document.getElementById('fab-add-event').addEventListener('click', () => openEventModal(null));
   document.getElementById('btn-add-event-inline').addEventListener('click', () => openEventModal(null));
   document.getElementById('btn-view-day-album').addEventListener('click', () => {
@@ -1568,7 +1825,7 @@ function bindEvents() {
     });
   });
 
-  // 行程表單互動（開始日期連動＋新增標籤按鈕與 Enter 鍵）
+  // 行程表單互動
   document.getElementById('ev-start-date').addEventListener('change', (e) => {
     const endInput = document.getElementById('ev-end-date');
     if (!endInput.value || endInput.value < e.target.value) {
@@ -1577,9 +1834,7 @@ function bindEvents() {
   });
   const addTagBtn = document.getElementById('btn-add-tag');
   const newTagInput = document.getElementById('ev-tag-new-input');
-  if (addTagBtn) {
-    addTagBtn.addEventListener('click', addTagsFromInput);
-  }
+  if (addTagBtn) addTagBtn.addEventListener('click', addTagsFromInput);
   if (newTagInput) {
     newTagInput.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
@@ -1591,7 +1846,7 @@ function bindEvents() {
   document.getElementById('form-event').addEventListener('submit', handleSaveEvent);
   document.getElementById('btn-delete-event').addEventListener('click', handleDeleteEvent);
 
-  // 相簿搜尋、成員篩選與載入更多
+  // 相簿搜尋、成員篩選、合併與載入更多
   let albumSearchTimer = null;
   const searchInput = document.getElementById('album-search-input');
   const clearSearchBtn = document.getElementById('btn-clear-search');
@@ -1650,6 +1905,15 @@ function bindEvents() {
   document.getElementById('form-post').addEventListener('submit', handleSavePost);
   document.getElementById('btn-delete-post').addEventListener('click', handleDeleteEntirePost);
 
+  const openMergePostBtn = document.getElementById('btn-open-merge-post');
+  if (openMergePostBtn) {
+    openMergePostBtn.addEventListener('click', () => {
+      if (state.editingPost) openMergeModal(state.editingPost.post_id, '');
+    });
+  }
+  const mergeForm = document.getElementById('form-merge');
+  if (mergeForm) mergeForm.addEventListener('submit', handleConfirmMerge);
+
   // 暱稱編輯
   document.getElementById('btn-profile').addEventListener('click', () => {
     document.getElementById('profile-name-input').value = state.user?.display_name || '';
@@ -1667,23 +1931,28 @@ function bindEvents() {
   document.getElementById('btn-confirm-cancel').addEventListener('click', () => resolveConfirm(false));
   document.getElementById('btn-confirm-ok').addEventListener('click', () => resolveConfirm(true));
 
-  // 通用關閉按鈕與點擊遮罩關閉
+  // 通用關閉與遮罩關閉
   document.querySelectorAll('.modal-close').forEach((btn) => {
     btn.addEventListener('click', () => closeModal(btn.dataset.close));
   });
-  ['modal-event', 'modal-post', 'modal-profile'].forEach((id) => {
-    document.getElementById(id).addEventListener('click', (e) => {
-      if (e.target.id === id) closeModal(id);
-    });
+  ['modal-event', 'modal-post', 'modal-merge', 'modal-profile'].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) {
+      el.addEventListener('click', (e) => {
+        if (e.target.id === id) closeModal(id);
+      });
+    }
   });
 
-  // Esc 鍵依層級關閉最上層彈窗
+  // Esc 依層級關閉最上層彈窗
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
     if (!document.getElementById('modal-confirm').classList.contains('hidden')) {
       resolveConfirm(false);
     } else if (!document.getElementById('modal-lightbox').classList.contains('hidden')) {
       closeLightbox();
+    } else if (!document.getElementById('modal-merge').classList.contains('hidden')) {
+      closeModal('modal-merge');
     } else {
       ['modal-event', 'modal-post', 'modal-profile'].forEach(closeModal);
     }
