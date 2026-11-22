@@ -1,5 +1,6 @@
 /**
- * 家庭行事曆與生活相簿前端主程式（時間軸＋相簿合併＋群組分享全功能版）
+ * 家庭行事曆與生活相簿前端主程式（最終完整整合版）
+ * 請將以下兩組設定替換為你自己的 LIFF ID 與 GAS 部署網址 (/exec)
  */
 const CONFIG = {
   LIFF_ID: '2012740107-BWMenJbV',
@@ -7,6 +8,7 @@ const CONFIG = {
   PAGE_SIZE: 20,
 };
 
+// 高對比自動標籤調色盤（同標籤透過確定性雜湊永遠固定對應同一色碼）
 const TAG_COLOR_PALETTE = [
   '#2563eb', '#059669', '#d97706', '#7c3aed',
   '#dc2626', '#0891b2', '#db2777', '#4f46e5',
@@ -15,6 +17,9 @@ const TAG_COLOR_PALETTE = [
 ];
 
 const RELOGIN_COOLDOWN_KEY = 'family_hub_relogin_ts';
+const CALENDAR_VIEW_PREF_PREFIX = 'family_hub_cal_view_';
+const TIMELINE_14_PREF_PREFIX = 'family_hub_cal_14d_';
+const MOBILE_VIEW_BREAKPOINT = 768; // 螢幕寬度 <= 768px 初次開啟預設顯示時間軸
 
 // ============================================================================
 // 應用程式狀態
@@ -24,37 +29,45 @@ const state = {
   idToken: '',
   user: null,
   usersMap: {},
-  canSharePicker: false,
   currentTab: 'calendar',
   isReloggingIn: false,
 
   // 行事曆狀態
-  calendarViewMode: 'month', // 'month' | 'timeline'
-  timelinePastExpanded: false, // 新增：時間軸過去行程是否展開
+  calendarViewMode: 'month',     // 'month' | 'timeline'
+  timelinePastExpanded: false,   // 當月過去紀錄是否展開
+  timelineNext14Mode: false,     // 是否開啟跨月未來 14 天模式
+  loadedMonthKey: '',            // 記錄目前快取的單月 key (YYYY-M)
+  upcoming14Events: [],          // 未來 14 天合併行程
+  upcoming14Thumbnails: {},      // 未來 14 天合併每日縮圖
+  upcoming14Range: null,         // { start, end }
   viewYear: nowDate.getFullYear(),
   viewMonth: nowDate.getMonth() + 1,
   selectedDate: toDateStr(nowDate),
   selectedTagFilter: '',
-  existingTags: [],
-  modalSelectedTags: [],
+  existingTags: [],              // 整份試算表既有標籤清單
+  modalSelectedTags: [],         // 行程彈窗目前選中的多選標籤（第 1 個決定底色）
   monthEvents: [],
   photoDates: new Set(),
   dayThumbnails: {},
 
-  // 相簿狀態
+  // 生活相簿狀態
   albumPosts: [],
   albumPage: 1,
   albumHasMore: false,
   albumLoadedOnce: false,
-  albumFilter: null,
+  albumFilter: null,             // { type: 'event'|'date'|'post', value, label }
   albumKeyword: '',
   albumAuthorId: '',
+  albumYear: '',
+  albumMonth: '',
+  albumMonthCounts: {},
   albumTotal: 0,
   albumReqSeq: 0,
 
-  // 編輯、合併與燈箱暫存
+  // 彈窗與燈箱暫存
+  editingEvent: null,
   editingPost: null,
-  mergeContext: null, // { sourcePostId, mediaId }
+  mergeContext: null,            // { sourcePostId, mediaId }
   lightboxOriginalUrl: '',
   confirmResolver: null,
 };
@@ -122,17 +135,34 @@ async function verifyMemberAndBoot() {
 
   state.user = res.data.user;
   state.usersMap = res.data.usersMap || {};
-  state.canSharePicker = typeof liff !== 'undefined' && liff.isApiAvailable('shareTargetPicker');
 
   renderHeaderProfile();
   renderAlbumMemberFilter();
+
+  // 套用該成員偏好的行事曆視圖與「跨月未來 14 天」開關（首次依裝置寬度決定，不寫入 localStorage）
+  setCalendarViewMode(getPreferredCalendarViewMode(), { persist: false, render: false });
+  state.timelineNext14Mode = getPreferredTimeline14Mode();
+  const chk14Init = document.getElementById('chk-timeline-14days');
+  if (chk14Init) chk14Init.checked = state.timelineNext14Mode;
+
   showScreen('app');
 
-  // 支援網址參數：?tab=album&editPost=xxx 或 ?tab=album&postId=xxx
+  // 解析網址參數：?tab=album&editPost=xxx / ?tab=album&postId=xxx / ?tab=calendar&date=YYYY-MM-DD
   const params = new URLSearchParams(window.location.search);
   const initTab = params.get('tab') === 'album' ? 'album' : 'calendar';
   const editPostId = params.get('editPost');
   const focusPostId = params.get('postId');
+  const focusDate = params.get('date');
+
+  if (focusDate && /^\d{4}-\d{2}-\d{2}$/.test(focusDate)) {
+    state.selectedDate = focusDate;
+    const [fy, fm] = focusDate.split('-').map(Number);
+    state.viewYear = fy;
+    state.viewMonth = fm;
+    // 從分享行程卡片點進特定日期時，暫時關閉 14 天模式確保看得到目標日期（不覆寫儲存偏好）
+    state.timelineNext14Mode = false;
+    if (chk14Init) chk14Init.checked = false;
+  }
 
   if (focusPostId) {
     await jumpToAlbumFilter({
@@ -148,7 +178,7 @@ async function verifyMemberAndBoot() {
     await openAlbumEditById(editPostId);
   }
 
-  if (editPostId || focusPostId) {
+  if (editPostId || focusPostId || focusDate) {
     const cleanUrl = window.location.origin + window.location.pathname;
     window.history.replaceState({}, '', cleanUrl);
   }
@@ -212,7 +242,7 @@ function triggerRelogin(manual = false) {
 }
 
 // ============================================================================
-// API 呼叫
+// API 呼叫（以 text/plain 送 JSON 避開 GAS CORS 預檢）
 // ============================================================================
 async function apiCall(action, payload = {}) {
   if (isIdTokenExpired(state.idToken)) {
@@ -245,7 +275,7 @@ async function apiCall(action, payload = {}) {
 }
 
 // ============================================================================
-// 分頁與介面狀態切換
+// 介面切換與個人視圖偏好記憶
 // ============================================================================
 function showScreen(name, message) {
   document.getElementById('screen-loading').classList.toggle('hidden', name !== 'loading');
@@ -289,7 +319,11 @@ async function switchTab(tab) {
   if (tab === 'calendar') {
     headerIcon.className = 'fa-regular fa-calendar-days';
     headerText.textContent = '家庭行事曆';
-    await loadCalendarMonth(state.viewYear, state.viewMonth);
+    if (isTimelineNext14Active()) {
+      await loadUpcoming14Days(false);
+    } else {
+      await loadCalendarMonth(state.viewYear, state.viewMonth);
+    }
   } else {
     headerIcon.className = 'fa-regular fa-images';
     headerText.textContent = '生活相簿';
@@ -299,9 +333,54 @@ async function switchTab(tab) {
   }
 }
 
-function setCalendarViewMode(mode) {
-  state.calendarViewMode = mode;
-  const isMonth = mode === 'month';
+function getCalendarViewStorageKey() {
+  const uid = (state.user && state.user.user_id) ? state.user.user_id : 'guest';
+  return CALENDAR_VIEW_PREF_PREFIX + uid;
+}
+
+function getPreferredCalendarViewMode() {
+  try {
+    const saved = localStorage.getItem(getCalendarViewStorageKey());
+    if (saved === 'month' || saved === 'timeline') return saved;
+  } catch (_) {}
+  return window.innerWidth <= MOBILE_VIEW_BREAKPOINT ? 'timeline' : 'month';
+}
+
+function saveCalendarViewMode(mode) {
+  if (mode !== 'month' && mode !== 'timeline') return;
+  try {
+    localStorage.setItem(getCalendarViewStorageKey(), mode);
+  } catch (_) {}
+}
+
+function getTimeline14StorageKey() {
+  const uid = (state.user && state.user.user_id) ? state.user.user_id : 'guest';
+  return TIMELINE_14_PREF_PREFIX + uid;
+}
+
+function getPreferredTimeline14Mode() {
+  try {
+    return localStorage.getItem(getTimeline14StorageKey()) === '1';
+  } catch (_) {
+    return false;
+  }
+}
+
+function saveTimeline14Mode(enabled) {
+  try {
+    localStorage.setItem(getTimeline14StorageKey(), enabled ? '1' : '0');
+  } catch (_) {}
+}
+
+function setCalendarViewMode(mode, options = {}) {
+  const { persist = true, render = true } = options;
+  const validMode = mode === 'timeline' ? 'timeline' : 'month';
+  state.calendarViewMode = validMode;
+  const isMonth = validMode === 'month';
+
+  if (persist) {
+    saveCalendarViewMode(validMode);
+  }
 
   const btnMonth = document.getElementById('btn-view-month');
   const btnTimeline = document.getElementById('btn-view-timeline');
@@ -316,7 +395,20 @@ function setCalendarViewMode(mode) {
   if (timelineWrap) timelineWrap.classList.toggle('hidden', isMonth);
   if (dayPanel) dayPanel.classList.toggle('hidden', !isMonth);
 
-  renderCalendarCurrentView();
+  if (render) {
+    if (isTimelineNext14Active()) {
+      loadUpcoming14Days(false);
+    } else if (state.loadedMonthKey !== `${state.viewYear}-${state.viewMonth}`) {
+      loadCalendarMonth(state.viewYear, state.viewMonth);
+    } else {
+      renderCalendarTagFilter();
+      renderCalendarCurrentView();
+    }
+  }
+}
+
+function isTimelineNext14Active() {
+  return state.calendarViewMode === 'timeline' && state.timelineNext14Mode;
 }
 
 function renderCalendarCurrentView() {
@@ -329,7 +421,7 @@ function renderCalendarCurrentView() {
 }
 
 // ============================================================================
-// 分頁 1：行事曆（月曆視圖＋時間軸視圖＋多標籤篩選）
+// 分頁 1：行事曆（單月載入、跨月 14 天載入、月曆、時間軸、多標籤篩選）
 // ============================================================================
 async function loadCalendarMonth(year, month) {
   if (year !== state.viewYear || month !== state.viewMonth) {
@@ -353,6 +445,7 @@ async function loadCalendarMonth(year, month) {
     state.existingTags = parseTags(res.data.allTags || []);
     state.photoDates = new Set(res.data.photoDates || []);
     state.dayThumbnails = res.data.dayThumbnails || {};
+    state.loadedMonthKey = `${year}-${month}`;
 
     renderCalendarTagFilter();
     renderCalendarCurrentView();
@@ -361,28 +454,140 @@ async function loadCalendarMonth(year, month) {
   }
 }
 
+async function loadUpcoming14Days(forceReload = false) {
+  const listEl = document.getElementById('cal-timeline-list');
+  const rangeBadge = document.getElementById('timeline-14-range');
+
+  const today = new Date();
+  const todayStr = toDateStr(today);
+  const endObj = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 14);
+  const endStr = toDateStr(endObj);
+
+  state.upcoming14Range = { start: todayStr, end: endStr };
+  document.getElementById('cal-month-label').textContent = `${state.viewYear} 年 ${state.viewMonth} 月`;
+
+  if (rangeBadge) {
+    rangeBadge.textContent = `${todayStr.slice(5).replace('-', '/')} – ${endStr.slice(5).replace('-', '/')}`;
+    rangeBadge.classList.remove('hidden');
+  }
+
+  if (listEl) {
+    listEl.innerHTML = '<div class="empty-hint">載入未來 14 天行程中...</div>';
+  }
+
+  const monthsToFetch = [{ year: today.getFullYear(), month: today.getMonth() + 1 }];
+  const endYear = endObj.getFullYear();
+  const endMonth = endObj.getMonth() + 1;
+  if (endYear !== monthsToFetch[0].year || endMonth !== monthsToFetch[0].month) {
+    monthsToFetch.push({ year: endYear, month: endMonth });
+  }
+
+  try {
+    const responses = await Promise.all(
+      monthsToFetch.map((m) => {
+        const key = `${m.year}-${m.month}`;
+        if (!forceReload && state.loadedMonthKey === key) {
+          return Promise.resolve({
+            ok: true,
+            data: {
+              events: state.monthEvents,
+              allTags: state.existingTags,
+              photoDates: Array.from(state.photoDates),
+              dayThumbnails: state.dayThumbnails,
+            },
+          });
+        }
+        return apiCall('getMonthEvents', { year: m.year, month: m.month });
+      })
+    );
+
+    for (const res of responses) {
+      if (!res || !res.ok) {
+        if (res && res.code !== 'UNAUTHORIZED') {
+          showToast(res.message || '載入跨月行程失敗', 'error');
+        }
+        return;
+      }
+    }
+
+    // 若撈取結果包含目前停駐月份，同步快取為單月資料（切回月曆或關閉 14 天時可秒開）
+    responses.forEach((res, idx) => {
+      const mInfo = monthsToFetch[idx];
+      if (
+        mInfo.year === state.viewYear &&
+        mInfo.month === state.viewMonth &&
+        (forceReload || state.loadedMonthKey !== `${mInfo.year}-${mInfo.month}`)
+      ) {
+        state.monthEvents = (res.data.events || []).map((ev) => ({
+          ...ev,
+          tags: parseTags(ev.tags !== undefined ? ev.tags : ev.tag),
+        }));
+        state.photoDates = new Set(res.data.photoDates || Object.keys(res.data.dayThumbnails || {}));
+        state.dayThumbnails = res.data.dayThumbnails || {};
+        state.loadedMonthKey = `${mInfo.year}-${mInfo.month}`;
+      }
+    });
+
+    const eventMap = new Map();
+    const mergedThumbs = {};
+    const mergedTags = [...state.existingTags];
+
+    responses.forEach((res) => {
+      (res.data.allTags || []).forEach((t) => mergedTags.push(t));
+
+      (res.data.events || []).forEach((ev) => {
+        const norm = { ...ev, tags: parseTags(ev.tags !== undefined ? ev.tags : ev.tag) };
+        const evEnd = norm.end_date || norm.start_date;
+        if (norm.start_date <= endStr && evEnd >= todayStr) {
+          eventMap.set(norm.event_id, norm);
+        }
+      });
+
+      const thumbs = res.data.dayThumbnails || {};
+      Object.keys(thumbs).forEach((d) => {
+        if (d >= todayStr && d <= endStr) {
+          mergedThumbs[d] = thumbs[d];
+        }
+      });
+    });
+
+    state.existingTags = parseTags(mergedTags);
+    state.upcoming14Events = Array.from(eventMap.values()).sort((a, b) => {
+      if (a.start_date !== b.start_date) return a.start_date.localeCompare(b.start_date);
+      return (a.start_time || '').localeCompare(b.start_time || '');
+    });
+    state.upcoming14Thumbnails = mergedThumbs;
+
+    renderCalendarTagFilter();
+    renderCalendarTimeline();
+  } catch (err) {
+    showToast('無法連線取得未來 14 天行程', 'error');
+  }
+}
+
 function renderCalendarTagFilter() {
   const bar = document.getElementById('cal-tag-filter');
   if (!bar) return;
   bar.innerHTML = '';
 
+  const sourceEvents = isTimelineNext14Active() ? state.upcoming14Events : state.monthEvents;
   const counts = {};
-  const monthTagOrder = [];
-  state.monthEvents.forEach((ev) => {
+  const tagOrder = [];
+  sourceEvents.forEach((ev) => {
     parseTags(ev.tags !== undefined ? ev.tags : ev.tag).forEach((t) => {
-      if (!counts[t]) monthTagOrder.push(t);
+      if (!counts[t]) tagOrder.push(t);
       counts[t] = (counts[t] || 0) + 1;
     });
   });
 
   if (state.selectedTagFilter && !counts[state.selectedTagFilter]) {
-    monthTagOrder.push(state.selectedTagFilter);
+    tagOrder.push(state.selectedTagFilter);
   }
 
-  const displayTags = monthTagOrder.length > 0 ? monthTagOrder : state.existingTags;
+  const displayTags = tagOrder.length > 0 ? tagOrder : state.existingTags;
 
   bar.appendChild(
-    createFilterChip('', '全部', '#1e293b', state.monthEvents.length, state.selectedTagFilter === '')
+    createFilterChip('', '全部', '#1e293b', sourceEvents.length, state.selectedTagFilter === '')
   );
 
   displayTags.forEach((tagName) => {
@@ -484,6 +689,7 @@ function renderCalendarGrid() {
     }
     cell.appendChild(topRow);
 
+    // 單日全部行程項目完整列出
     const dayEvents = getEventsForDate(dateStr);
     if (dayEvents.length > 0) {
       const bars = document.createElement('div');
@@ -513,13 +719,79 @@ function renderCalendarGrid() {
   }
 }
 
-/**
- * 時間軸視圖：當月預設摺疊「已結束的過去行程」，讓今天與未來行程置頂優先顯示
- */
 function renderCalendarTimeline() {
   const listEl = document.getElementById('cal-timeline-list');
+  const rangeBadge = document.getElementById('timeline-14-range');
   if (!listEl) return;
   listEl.innerHTML = '';
+
+  const todayStr = toDateStr(new Date());
+
+  // 模式 A：跨月顯示未來 14 天
+  if (state.timelineNext14Mode) {
+    if (rangeBadge && state.upcoming14Range) {
+      const s = state.upcoming14Range.start.slice(5).replace('-', '/');
+      const e = state.upcoming14Range.end.slice(5).replace('-', '/');
+      rangeBadge.textContent = `${s} – ${e}`;
+      rangeBadge.classList.remove('hidden');
+    }
+
+    const filteredEvents = state.upcoming14Events.filter((ev) => {
+      if (!state.selectedTagFilter) return true;
+      const tags = parseTags(ev.tags !== undefined ? ev.tags : ev.tag);
+      return tags.includes(state.selectedTagFilter);
+    });
+
+    const photoOnlyDates = !state.selectedTagFilter
+      ? Object.keys(state.upcoming14Thumbnails || {}).filter(
+          (d) => (state.upcoming14Thumbnails[d] || []).length > 0
+        )
+      : [];
+
+    if (filteredEvents.length === 0 && photoOnlyDates.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'empty-hint';
+      if (state.selectedTagFilter) {
+        empty.textContent = `未來 14 天內沒有「${state.selectedTagFilter}」相關行程`;
+        const clearBtn = document.createElement('button');
+        clearBtn.type = 'button';
+        clearBtn.className = 'link-btn';
+        clearBtn.style.marginLeft = '6px';
+        clearBtn.textContent = '顯示全部';
+        clearBtn.addEventListener('click', () => {
+          state.selectedTagFilter = '';
+          renderCalendarTagFilter();
+          renderCalendarCurrentView();
+        });
+        empty.appendChild(clearBtn);
+      } else {
+        empty.textContent = '未來 14 天內尚無安排行程或相簿紀錄';
+      }
+      listEl.appendChild(empty);
+      return;
+    }
+
+    const groups = groupEventsByStartDate(filteredEvents);
+    photoOnlyDates.forEach((d) => {
+      if (!groups.has(d)) groups.set(d, []);
+    });
+
+    Array.from(groups.keys()).sort().forEach((dateStr) => {
+      listEl.appendChild(
+        buildTimelineDayGroupElement(
+          dateStr,
+          groups.get(dateStr),
+          todayStr,
+          false,
+          state.upcoming14Thumbnails
+        )
+      );
+    });
+    return;
+  }
+
+  // 模式 B：單月時間軸（當月預設摺疊過去日期、過去月份全部展開）
+  if (rangeBadge) rangeBadge.classList.add('hidden');
 
   const filteredEvents = state.monthEvents.filter((ev) => {
     if (!state.selectedTagFilter) return true;
@@ -527,7 +799,11 @@ function renderCalendarTimeline() {
     return tags.includes(state.selectedTagFilter);
   });
 
-  if (filteredEvents.length === 0) {
+  const photoOnlyDates = !state.selectedTagFilter
+    ? Object.keys(state.dayThumbnails || {}).filter((d) => (state.dayThumbnails[d] || []).length > 0)
+    : [];
+
+  if (filteredEvents.length === 0 && photoOnlyDates.length === 0) {
     const empty = document.createElement('div');
     empty.className = 'empty-hint';
     if (state.selectedTagFilter) {
@@ -544,42 +820,57 @@ function renderCalendarTimeline() {
       });
       empty.appendChild(clearBtn);
     } else {
-      empty.textContent = `${state.viewYear} 年 ${state.viewMonth} 月還沒有安排行程`;
+      empty.textContent = `${state.viewYear} 年 ${state.viewMonth} 月還沒有安排行程或相簿紀錄`;
     }
     listEl.appendChild(empty);
     return;
   }
 
   const now = new Date();
-  const todayStr = toDateStr(now);
   const isEntirePastMonth =
     state.viewYear < now.getFullYear() ||
     (state.viewYear === now.getFullYear() && state.viewMonth < now.getMonth() + 1);
 
-  // 若切換去瀏覽過去的月份，直接全部展開方便回顧
   if (isEntirePastMonth) {
     const allGroups = groupEventsByStartDate(filteredEvents);
-    allGroups.forEach((events, dateStr) => {
-      listEl.appendChild(buildTimelineDayGroupElement(dateStr, events, todayStr, false));
+    photoOnlyDates.forEach((d) => {
+      if (!allGroups.has(d)) allGroups.set(d, []);
+    });
+    Array.from(allGroups.keys()).sort().forEach((dateStr) => {
+      listEl.appendChild(
+        buildTimelineDayGroupElement(dateStr, allGroups.get(dateStr), todayStr, false, state.dayThumbnails)
+      );
     });
     return;
   }
 
-  // 當月／未來月：區分「已結束的過去行程」與「進行中／今天之後的行程」
-  const pastEvents = [];
-  const upcomingEvents = [];
+  const pastGroups = new Map();
+  const upcomingGroups = new Map();
+  let pastEventCount = 0;
+
   filteredEvents.forEach((ev) => {
     const endDate = ev.end_date || ev.start_date;
-    if (endDate < todayStr) {
-      pastEvents.push(ev);
-    } else {
-      upcomingEvents.push(ev);
-    }
+    const targetMap = endDate < todayStr ? pastGroups : upcomingGroups;
+    if (endDate < todayStr) pastEventCount++;
+    if (!targetMap.has(ev.start_date)) targetMap.set(ev.start_date, []);
+    targetMap.get(ev.start_date).push(ev);
   });
 
-  // 1. 過去行程摺疊區塊
-  if (pastEvents.length > 0) {
-    const pastGroups = groupEventsByStartDate(pastEvents);
+  photoOnlyDates.forEach((d) => {
+    if (pastGroups.has(d) || upcomingGroups.has(d)) return;
+    if (d < todayStr) pastGroups.set(d, []);
+    else upcomingGroups.set(d, []);
+  });
+
+  const pastDates = Array.from(pastGroups.keys()).sort();
+  const upcomingDates = Array.from(upcomingGroups.keys()).sort();
+
+  if (pastDates.length > 0) {
+    const pastPhotoDays = pastDates.filter((d) => (state.dayThumbnails[d] || []).length > 0).length;
+    const summaryParts = [`${pastDates.length} 天`];
+    if (pastEventCount > 0) summaryParts.push(`${pastEventCount} 筆行程`);
+    if (pastPhotoDays > 0) summaryParts.push(`${pastPhotoDays} 天有相簿`);
+
     const pastSection = document.createElement('div');
     pastSection.className = 'timeline-past-section' + (state.timelinePastExpanded ? ' expanded' : '');
 
@@ -590,7 +881,7 @@ function renderCalendarTimeline() {
     toggleBtn.innerHTML =
       `<span class="timeline-past-title">` +
         `<i class="fa-solid fa-clock-rotate-left"></i>` +
-        `<span>已過去的行程（${pastGroups.size} 天・${pastEvents.length} 筆）</span>` +
+        `<span>已過去的紀錄（${summaryParts.join('・')}）</span>` +
       `</span>` +
       `<span class="timeline-past-action">` +
         `<span>${state.timelinePastExpanded ? '收合' : '展開'}</span>` +
@@ -605,24 +896,25 @@ function renderCalendarTimeline() {
 
     const pastBody = document.createElement('div');
     pastBody.className = 'timeline-past-body' + (state.timelinePastExpanded ? '' : ' hidden');
-    pastGroups.forEach((events, dateStr) => {
-      pastBody.appendChild(buildTimelineDayGroupElement(dateStr, events, todayStr, true));
+    pastDates.forEach((dateStr) => {
+      pastBody.appendChild(
+        buildTimelineDayGroupElement(dateStr, pastGroups.get(dateStr), todayStr, true, state.dayThumbnails)
+      );
     });
     pastSection.appendChild(pastBody);
-
     listEl.appendChild(pastSection);
   }
 
-  // 2. 今天與接下來的行程（預設直接顯示）
-  if (upcomingEvents.length === 0) {
+  if (upcomingDates.length === 0) {
     const emptyUpcoming = document.createElement('div');
     emptyUpcoming.className = 'empty-hint';
     emptyUpcoming.textContent = '本月今天之後尚無安排行程';
     listEl.appendChild(emptyUpcoming);
   } else {
-    const upcomingGroups = groupEventsByStartDate(upcomingEvents);
-    upcomingGroups.forEach((events, dateStr) => {
-      listEl.appendChild(buildTimelineDayGroupElement(dateStr, events, todayStr, false));
+    upcomingDates.forEach((dateStr) => {
+      listEl.appendChild(
+        buildTimelineDayGroupElement(dateStr, upcomingGroups.get(dateStr), todayStr, false, state.dayThumbnails)
+      );
     });
   }
 }
@@ -637,7 +929,7 @@ function groupEventsByStartDate(events) {
   return groups;
 }
 
-function buildTimelineDayGroupElement(dateStr, events, todayStr, isPastGroup) {
+function buildTimelineDayGroupElement(dateStr, events, todayStr, isPastGroup, thumbnailsMap = state.dayThumbnails) {
   const groupEl = document.createElement('div');
   groupEl.className = 'timeline-day-group' + (isPastGroup ? ' is-past' : '');
 
@@ -654,35 +946,59 @@ function buildTimelineDayGroupElement(dateStr, events, todayStr, isPastGroup) {
   wk.textContent = getWeekdayShort(dateStr);
   dateCol.appendChild(wk);
 
-  // 跨日行程若開始日早於今天但仍在進行中，加上「進行中」小標記
-  if (!isPastGroup && dateStr < todayStr) {
+  if (!isPastGroup && dateStr < todayStr && events.length > 0) {
     const ongoing = document.createElement('div');
     ongoing.className = 'timeline-ongoing-badge';
     ongoing.textContent = '進行中';
     dateCol.appendChild(ongoing);
   }
 
-  if (state.photoDates.has(dateStr)) {
-    const camBtn = document.createElement('button');
-    camBtn.type = 'button';
-    camBtn.className = 'timeline-day-cam';
-    camBtn.title = '查看當日生活相簿';
-    camBtn.innerHTML = '<i class="fa-solid fa-camera"></i>';
-    camBtn.addEventListener('click', () => {
+  const eventsCol = document.createElement('div');
+  eventsCol.className = 'timeline-events-col';
+
+  events.forEach((ev) => {
+    eventsCol.appendChild(buildEventCardElement(ev));
+  });
+
+  // 當日生活相簿縮圖條
+  const thumbs = (thumbnailsMap && thumbnailsMap[dateStr]) || [];
+  if (thumbs.length > 0) {
+    const photosBox = document.createElement('div');
+    photosBox.className = 'timeline-photos-box';
+
+    const header = document.createElement('div');
+    header.className = 'timeline-photos-header';
+
+    const titleSpan = document.createElement('span');
+    titleSpan.innerHTML = `<i class="fa-solid fa-camera"></i> 當日生活相簿（${thumbs.length}）`;
+    header.appendChild(titleSpan);
+
+    const viewBtn = document.createElement('button');
+    viewBtn.type = 'button';
+    viewBtn.className = 'link-btn';
+    viewBtn.innerHTML = '在相簿查看 <i class="fa-solid fa-arrow-right"></i>';
+    viewBtn.addEventListener('click', () => {
       jumpToAlbumFilter({
         type: 'date',
         value: dateStr,
         label: `當日相簿：${dateStr}`,
       });
     });
-    dateCol.appendChild(camBtn);
-  }
+    header.appendChild(viewBtn);
+    photosBox.appendChild(header);
 
-  const eventsCol = document.createElement('div');
-  eventsCol.className = 'timeline-events-col';
-  events.forEach((ev) => {
-    eventsCol.appendChild(buildEventCardElement(ev));
-  });
+    const strip = document.createElement('div');
+    strip.className = 'thumb-strip timeline-thumb-strip';
+    thumbs.forEach((m) => {
+      const item = document.createElement('div');
+      item.className = 'strip-item';
+      appendMediaThumbElement(item, m, dateStr);
+      strip.appendChild(item);
+    });
+    photosBox.appendChild(strip);
+
+    eventsCol.appendChild(photosBox);
+  }
 
   groupEl.appendChild(dateCol);
   groupEl.appendChild(eventsCol);
@@ -731,10 +1047,41 @@ function buildEventCardElement(ev) {
   timeBadge.textContent = rangeText;
   badges.appendChild(timeBadge);
 
+  const actions = document.createElement('div');
+  actions.className = 'event-card-actions';
+
+  // 一鍵複製為新行程
+  const copyBtn = document.createElement('button');
+  copyBtn.type = 'button';
+  copyBtn.className = 'event-copy-btn';
+  copyBtn.title = '複製成新行程';
+  copyBtn.setAttribute('aria-label', '複製成新行程');
+  copyBtn.innerHTML = '<i class="fa-regular fa-copy"></i>';
+  copyBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    openEventModal(ev, { isCopy: true });
+  });
+  actions.appendChild(copyBtn);
+
+  // 分享單筆行程卡片到 LINE
+  const shareBtn = document.createElement('button');
+  shareBtn.type = 'button';
+  shareBtn.className = 'event-share-btn';
+  shareBtn.title = '分享行程卡片到 LINE';
+  shareBtn.setAttribute('aria-label', '分享行程卡片到 LINE');
+  shareBtn.innerHTML = '<i class="fa-regular fa-paper-plane"></i>';
+  shareBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    handleShareEvent(ev);
+  });
+  actions.appendChild(shareBtn);
+
   const editIcon = document.createElement('i');
   editIcon.className = 'fa-regular fa-pen-to-square muted';
+  actions.appendChild(editIcon);
+
   top.appendChild(badges);
-  top.appendChild(editIcon);
+  top.appendChild(actions);
   card.appendChild(top);
 
   const title = document.createElement('div');
@@ -826,7 +1173,7 @@ function renderSelectedDayPanel() {
 }
 
 // ============================================================================
-// 行程新增 / 編輯 / 刪除彈窗（多選既有標籤＋新增標籤）
+// 行程新增 / 編輯 / 複製 / 刪除彈窗
 // ============================================================================
 function renderModalTagUI() {
   const selectedWrap = document.getElementById('ev-selected-tags');
@@ -930,39 +1277,87 @@ function addTagsFromInput() {
   renderModalTagUI();
 }
 
-function openEventModal(ev = null) {
-  const isEdit = Boolean(ev);
-  document.getElementById('modal-event-title').textContent = isEdit ? '編輯行程' : '新增行程';
+/**
+ * 開啟行程彈窗：
+ * - ev 為 null：全新空白新增
+ * - ev 有值且 isCopy=false：編輯既有行程
+ * - ev 有值且 isCopy=true：帶入所有資料但清除 event_id，直接建立為新行程
+ */
+function openEventModal(ev = null, options = {}) {
+  const isCopy = Boolean(ev && options.isCopy);
+  const isEdit = Boolean(ev && !isCopy);
+
+  state.editingEvent = isEdit ? ev : null;
+
+  const titleEl = document.getElementById('modal-event-title');
+  titleEl.textContent = isCopy ? '複製行程（新增）' : (isEdit ? '編輯行程' : '新增行程');
+
+  const startInput = document.getElementById('ev-start-date');
+  const endInput = document.getElementById('ev-end-date');
+  const initStart = ev ? ev.start_date : state.selectedDate;
+  const initEnd = ev ? (ev.end_date || ev.start_date) : state.selectedDate;
+
   document.getElementById('ev-id').value = isEdit ? ev.event_id : '';
-  document.getElementById('ev-title').value = isEdit ? (ev.title || '') : '';
-  document.getElementById('ev-start-date').value = isEdit ? ev.start_date : state.selectedDate;
-  document.getElementById('ev-end-date').value = isEdit ? (ev.end_date || ev.start_date) : state.selectedDate;
-  document.getElementById('ev-start-time').value = isEdit ? (ev.start_time || '') : '';
-  document.getElementById('ev-content').value = isEdit ? (ev.content || '') : '';
+  document.getElementById('ev-title').value = ev ? (ev.title || '') : '';
+  startInput.value = initStart;
+  startInput.dataset.prevValue = initStart;
+  endInput.value = initEnd;
+  document.getElementById('ev-start-time').value = ev ? (ev.start_time || '') : '';
+  document.getElementById('ev-content').value = ev ? (ev.content || '') : '';
 
   const newTagInput = document.getElementById('ev-tag-new-input');
   if (newTagInput) newTagInput.value = '';
 
-  if (isEdit) {
+  if (ev) {
     state.modalSelectedTags = parseTags(ev.tags !== undefined ? ev.tags : ev.tag);
   } else {
     state.modalSelectedTags = state.selectedTagFilter ? [state.selectedTagFilter] : [];
   }
   renderModalTagUI();
 
+  const copyModalBtn = document.getElementById('btn-copy-event');
+  const shareModalBtn = document.getElementById('btn-share-event');
   const delBtn = document.getElementById('btn-delete-event');
   const metaEl = document.getElementById('ev-meta-info');
+
+  if (copyModalBtn) copyModalBtn.classList.toggle('hidden', !isEdit);
+  if (shareModalBtn) shareModalBtn.classList.toggle('hidden', !isEdit);
+  delBtn.classList.toggle('hidden', !isEdit);
+
   if (isEdit) {
-    delBtn.classList.remove('hidden');
     const updater = state.usersMap[ev.updated_by]?.display_name || ev.updated_by || '成員';
     metaEl.textContent = `最後編輯：${updater}（${ev.updated_at || ''}）`;
     metaEl.classList.remove('hidden');
   } else {
-    delBtn.classList.add('hidden');
     metaEl.classList.add('hidden');
   }
 
   openModal('modal-event');
+
+  if (isCopy) {
+    showToast('已帶入行程資料，請微調日期或內容後按儲存', 'info');
+  }
+}
+
+/**
+ * 於編輯彈窗內點擊右上角「複製」按鈕：保留當下已填寫內容並直接轉為新增模式
+ */
+function convertCurrentModalToCopy() {
+  addTagsFromInput();
+  state.editingEvent = null;
+  document.getElementById('ev-id').value = '';
+  document.getElementById('modal-event-title').textContent = '複製行程（新增）';
+
+  const copyModalBtn = document.getElementById('btn-copy-event');
+  const shareModalBtn = document.getElementById('btn-share-event');
+  if (copyModalBtn) copyModalBtn.classList.add('hidden');
+  if (shareModalBtn) shareModalBtn.classList.add('hidden');
+  document.getElementById('btn-delete-event').classList.add('hidden');
+  document.getElementById('ev-meta-info').classList.add('hidden');
+
+  showToast('已複製為新行程，請調整日期或內容後按儲存', 'info');
+  const startInput = document.getElementById('ev-start-date');
+  if (startInput) startInput.focus();
 }
 
 async function handleSaveEvent(e) {
@@ -1010,8 +1405,13 @@ async function handleSaveEvent(e) {
     showToast(payload.event_id ? '行程已更新' : '已新增行程', 'success');
 
     state.selectedDate = payload.start_date;
-    const [y, m] = payload.start_date.split('-').map(Number);
-    await loadCalendarMonth(y, m);
+    state.loadedMonthKey = '';
+    if (isTimelineNext14Active()) {
+      await loadUpcoming14Days(true);
+    } else {
+      const [y, m] = payload.start_date.split('-').map(Number);
+      await loadCalendarMonth(y, m);
+    }
   } catch (err) {
     showToast('儲存過程發生網路錯誤', 'error');
   } finally {
@@ -1036,7 +1436,12 @@ async function handleDeleteEvent() {
     }
     closeModal('modal-event');
     showToast('行程已刪除', 'success');
-    await loadCalendarMonth(state.viewYear, state.viewMonth);
+    state.loadedMonthKey = '';
+    if (isTimelineNext14Active()) {
+      await loadUpcoming14Days(true);
+    } else {
+      await loadCalendarMonth(state.viewYear, state.viewMonth);
+    }
   } catch (err) {
     showToast('刪除失敗，請稍後再試', 'error');
   } finally {
@@ -1045,7 +1450,7 @@ async function handleDeleteEvent() {
 }
 
 // ============================================================================
-// 分頁 2：生活相簿（搜尋、成員篩選、分享群組通知、合併貼文）
+// 分頁 2：生活相簿（關鍵字搜尋、年月快選、成員頭像篩選、分享、合併）
 // ============================================================================
 function renderAlbumMemberFilter() {
   const bar = document.getElementById('album-member-filter');
@@ -1098,14 +1503,75 @@ function renderAlbumMemberFilter() {
   });
 }
 
+function renderAlbumYearMonthSelects() {
+  const yearSel = document.getElementById('album-year-select');
+  const monthSel = document.getElementById('album-month-select');
+  if (!yearSel || !monthSel) return;
+
+  const counts = state.albumMonthCounts || {};
+  const byYear = {};
+
+  Object.keys(counts).forEach((ym) => {
+    const parts = ym.split('-');
+    if (parts.length !== 2) return;
+    const y = parts[0];
+    const m = parts[1];
+    if (!byYear[y]) byYear[y] = { total: 0, months: {} };
+    byYear[y].total += counts[ym];
+    byYear[y].months[m] = counts[ym];
+  });
+
+  if (state.albumYear && !byYear[state.albumYear]) {
+    byYear[state.albumYear] = { total: 0, months: {} };
+  }
+
+  const years = Object.keys(byYear).sort((a, b) => b.localeCompare(a));
+
+  yearSel.innerHTML = '<option value="">全部年份</option>';
+  years.forEach((y) => {
+    const opt = document.createElement('option');
+    opt.value = y;
+    opt.textContent = `${y} 年（${byYear[y].total} 篇）`;
+    yearSel.appendChild(opt);
+  });
+  yearSel.value = state.albumYear || '';
+
+  if (!state.albumYear) {
+    monthSel.innerHTML = '<option value="">全部月份</option>';
+    monthSel.value = '';
+    monthSel.disabled = true;
+    return;
+  }
+
+  monthSel.disabled = false;
+  monthSel.innerHTML = '<option value="">全部月份（全年）</option>';
+  const monthsMap = byYear[state.albumYear].months || {};
+  if (state.albumMonth && !monthsMap[state.albumMonth]) {
+    monthsMap[state.albumMonth] = 0;
+  }
+
+  Object.keys(monthsMap)
+    .sort((a, b) => b.localeCompare(a))
+    .forEach((m) => {
+      const opt = document.createElement('option');
+      opt.value = m;
+      opt.textContent = `${Number(m)} 月（${monthsMap[m]} 篇）`;
+      monthSel.appendChild(opt);
+    });
+  monthSel.value = state.albumMonth || '';
+}
+
 function resetAllAlbumFilters() {
   state.albumFilter = null;
   state.albumKeyword = '';
   state.albumAuthorId = '';
+  state.albumYear = '';
+  state.albumMonth = '';
   const input = document.getElementById('album-search-input');
   if (input) input.value = '';
   const clearBtn = document.getElementById('btn-clear-search');
   if (clearBtn) clearBtn.classList.add('hidden');
+  renderAlbumYearMonthSelects();
   renderAlbumMemberFilter();
 }
 
@@ -1138,6 +1604,8 @@ async function loadAlbumPosts(page = 1, append = false) {
   }
   if (state.albumKeyword) payload.keyword = state.albumKeyword;
   if (state.albumAuthorId) payload.authorId = state.albumAuthorId;
+  if (state.albumYear) payload.year = state.albumYear;
+  if (state.albumYear && state.albumMonth) payload.month = state.albumMonth;
 
   try {
     const res = await apiCall('getAlbumPosts', payload);
@@ -1149,6 +1617,11 @@ async function loadAlbumPosts(page = 1, append = false) {
     }
 
     const posts = res.data.posts || [];
+    if (res.data.monthCounts) {
+      state.albumMonthCounts = res.data.monthCounts;
+      renderAlbumYearMonthSelects();
+    }
+
     state.albumPage = res.data.page || page;
     state.albumTotal = Number(res.data.total || 0);
     state.albumHasMore = Boolean(res.data.hasMore);
@@ -1179,6 +1652,9 @@ function updateAlbumFilterBar(showCount) {
   const parts = [];
 
   if (state.albumFilter) parts.push(state.albumFilter.label);
+  if (state.albumYear) {
+    parts.push(state.albumMonth ? `${state.albumYear} 年 ${Number(state.albumMonth)} 月` : `${state.albumYear} 年`);
+  }
   if (state.albumAuthorId) {
     const name = state.usersMap[state.albumAuthorId]?.display_name || '成員';
     parts.push(`上傳者：${name}`);
@@ -1201,7 +1677,7 @@ function renderAlbumList() {
   listEl.innerHTML = '';
 
   if (state.albumPosts.length === 0) {
-    const hasFilter = Boolean(state.albumFilter || state.albumKeyword || state.albumAuthorId);
+    const hasFilter = Boolean(state.albumFilter || state.albumKeyword || state.albumAuthorId || state.albumYear);
     const empty = document.createElement('div');
     empty.className = 'empty-hint';
     empty.textContent = hasFilter
@@ -1247,11 +1723,12 @@ function renderAlbumList() {
     const actionsWrap = document.createElement('div');
     actionsWrap.className = 'post-header-actions';
 
-    // 顯示分享按鈕
+    // 固定顯示分享按鈕（改走 liff.shareTargetPicker，免拉機器人進群組）
     const shareBtn = document.createElement('button');
     shareBtn.type = 'button';
     shareBtn.className = 'icon-btn share-btn';
     shareBtn.title = '分享相簿卡片到 LINE 群組或好友';
+    shareBtn.setAttribute('aria-label', '分享相簿卡片到 LINE');
     shareBtn.innerHTML = '<i class="fa-regular fa-paper-plane"></i>';
     shareBtn.addEventListener('click', () => handleSharePost(post));
     actionsWrap.appendChild(shareBtn);
@@ -1260,6 +1737,7 @@ function renderAlbumList() {
     editBtn.type = 'button';
     editBtn.className = 'icon-btn';
     editBtn.title = '編輯貼文、合併相簿與關聯行程';
+    editBtn.setAttribute('aria-label', '編輯相簿貼文');
     editBtn.innerHTML = '<i class="fa-regular fa-pen-to-square"></i>';
     editBtn.addEventListener('click', () => openAlbumEditModal(post));
     actionsWrap.appendChild(editBtn);
@@ -1280,6 +1758,9 @@ function renderAlbumList() {
         const targetDate = post.linked_event.start_date;
         state.selectedDate = targetDate;
         state.selectedTagFilter = '';
+        state.timelineNext14Mode = false;
+        const chk = document.getElementById('chk-timeline-14days');
+        if (chk) chk.checked = false;
         const [y, m] = targetDate.split('-').map(Number);
         state.viewYear = y;
         state.viewMonth = m;
@@ -1316,7 +1797,44 @@ function renderAlbumList() {
   loadMoreWrap.classList.toggle('hidden', !state.albumHasMore);
 }
 
+function appendMediaThumbElement(container, media, dateLabel) {
+  const isVideo = media.media_type === 'video';
+  const thumbId = isVideo ? (media.thumb_file_id || media.drive_file_id) : media.drive_file_id;
+  const thumbUrl = getDriveThumbUrl(thumbId, 400);
+  const originalUrl = getDriveViewUrl(media.drive_file_id);
+
+  const img = document.createElement('img');
+  img.src = thumbUrl;
+  img.loading = 'lazy';
+  img.alt = isVideo ? '影片縮圖' : '生活照片縮圖';
+
+  img.onerror = () => {
+    img.remove();
+    const fallback = document.createElement('div');
+    fallback.className = 'video-fallback-bg';
+    fallback.innerHTML = isVideo
+      ? '<i class="fa-solid fa-film fa-lg"></i>'
+      : '<i class="fa-regular fa-image fa-lg"></i>';
+    container.prepend(fallback);
+  };
+  container.appendChild(img);
+
+  if (isVideo) {
+    const overlay = document.createElement('div');
+    overlay.className = 'video-overlay';
+    overlay.innerHTML = '<div class="video-play-circle"><i class="fa-solid fa-play"></i></div><span class="video-tag">影片</span>';
+    container.appendChild(overlay);
+    container.addEventListener('click', () => openExternalUrl(originalUrl));
+  } else {
+    container.addEventListener('click', () => openLightbox(media.drive_file_id, dateLabel));
+  }
+}
+
+// ============================================================================
+// LINE 分享卡片（liff.shareTargetPicker：生活相簿＋行事曆單筆行程）
+// ============================================================================
 async function handleSharePost(post) {
+  if (!post) return;
   if (typeof liff === 'undefined' || !liff.isApiAvailable('shareTargetPicker')) {
     showToast('目前開啟的環境不支援 LINE 分享選單，請改由手機 LINE 開啟', 'info');
     return;
@@ -1325,12 +1843,11 @@ async function handleSharePost(post) {
   try {
     const flexMessage = buildAlbumShareFlex(post);
     const res = await liff.shareTargetPicker([flexMessage], { isMultiple: true });
-    // 使用者實際送出後 res 會有回傳值；若中途關閉選單取消分享，res 為 undefined 不顯示錯誤
     if (res) {
       showToast('已成功分享生活相簿卡片！', 'success');
     }
   } catch (err) {
-    console.error('shareTargetPicker 失敗:', err);
+    console.error('shareTargetPicker 相簿分享失敗:', err);
     const errMsg = String((err && err.message) || '');
     if (err && (err.code === 'FORBIDDEN' || errMsg.toLowerCase().includes('permission') || errMsg.toLowerCase().includes('enable'))) {
       showToast('分享功能未啟用，請到 LINE Developers 後台開啟 LIFF 的 Share target picker', 'error');
@@ -1340,14 +1857,6 @@ async function handleSharePost(post) {
   }
 }
 
-function buildLiffPostUrl(postId) {
-  const id = String(CONFIG.LIFF_ID || '').trim();
-  return 'https://liff.line.me/' + encodeURIComponent(id) + '?tab=album&postId=' + encodeURIComponent(postId);
-}
-
-/**
- * 在前端組裝生活相簿分享 Flex Message（含封面縮圖、日期、關聯行程、摘要與直達網址）
- */
 function buildAlbumShareFlex(post) {
   const postUrl = buildLiffPostUrl(post.post_id);
   const media = Array.isArray(post.media) ? post.media : [];
@@ -1380,7 +1889,7 @@ function buildAlbumShareFlex(post) {
     },
     {
       type: 'text',
-      text: `${post.post_date || '生活紀錄'}｜${authorName}（共 ${media.length} 則媒體）`,
+      text: (post.post_date || '生活紀錄') + '｜' + authorName + '（共 ' + media.length + ' 則媒體）',
       size: 'sm',
       weight: 'bold',
       color: '#1E293B',
@@ -1394,7 +1903,7 @@ function buildAlbumShareFlex(post) {
     if (eventLabel) {
       bodyContents.push({
         type: 'text',
-        text: `關聯行程：${eventLabel}`,
+        text: '關聯行程：' + eventLabel,
         size: 'xs',
         color: '#0369A1',
         margin: 'xs',
@@ -1414,7 +1923,7 @@ function buildAlbumShareFlex(post) {
     },
     {
       type: 'text',
-      text: `由 ${sharerName} 分享`,
+      text: '由 ' + sharerName + ' 分享',
       size: 'xxs',
       color: '#94A3B8',
       margin: 'md',
@@ -1457,51 +1966,168 @@ function buildAlbumShareFlex(post) {
       size: 'full',
       aspectRatio: '16:10',
       aspectMode: 'cover',
-      action: {
-        type: 'uri',
-        uri: postUrl,
-      },
+      action: { type: 'uri', uri: postUrl },
     };
   }
 
   return {
     type: 'flex',
-    altText: `${sharerName} 分享了一篇生活相簿（${post.post_date || ''}）`,
+    altText: sharerName + ' 分享了一篇生活相簿（' + (post.post_date || '') + '）',
     contents: bubble,
   };
 }
 
-function appendMediaThumbElement(container, media, dateLabel) {
-  const isVideo = media.media_type === 'video';
-  const thumbId = isVideo ? (media.thumb_file_id || media.drive_file_id) : media.drive_file_id;
-  const thumbUrl = getDriveThumbUrl(thumbId, 400);
-  const originalUrl = getDriveViewUrl(media.drive_file_id);
-
-  const img = document.createElement('img');
-  img.src = thumbUrl;
-  img.loading = 'lazy';
-  img.alt = isVideo ? '影片縮圖' : '生活照片縮圖';
-
-  img.onerror = () => {
-    img.remove();
-    const fallback = document.createElement('div');
-    fallback.className = 'video-fallback-bg';
-    fallback.innerHTML = isVideo
-      ? '<i class="fa-solid fa-film fa-lg"></i>'
-      : '<i class="fa-regular fa-image fa-lg"></i>';
-    container.prepend(fallback);
-  };
-  container.appendChild(img);
-
-  if (isVideo) {
-    const overlay = document.createElement('div');
-    overlay.className = 'video-overlay';
-    overlay.innerHTML = '<div class="video-play-circle"><i class="fa-solid fa-play"></i></div><span class="video-tag">影片</span>';
-    container.appendChild(overlay);
-    container.addEventListener('click', () => openExternalUrl(originalUrl));
-  } else {
-    container.addEventListener('click', () => openLightbox(media.drive_file_id, dateLabel));
+async function handleShareEvent(ev) {
+  if (!ev) return;
+  if (typeof liff === 'undefined' || !liff.isApiAvailable('shareTargetPicker')) {
+    showToast('目前開啟的環境不支援 LINE 分享選單，請改由手機 LINE 開啟', 'info');
+    return;
   }
+
+  try {
+    const flexMessage = buildEventShareFlex(ev);
+    const res = await liff.shareTargetPicker([flexMessage], { isMultiple: true });
+    if (res) {
+      showToast('已成功分享行程卡片！', 'success');
+    }
+  } catch (err) {
+    console.error('shareTargetPicker 行程分享失敗:', err);
+    const errMsg = String((err && err.message) || '');
+    if (err && (err.code === 'FORBIDDEN' || errMsg.toLowerCase().includes('permission') || errMsg.toLowerCase().includes('enable'))) {
+      showToast('分享功能未啟用，請到 LINE Developers 後台開啟 LIFF 的 Share target picker', 'error');
+    } else {
+      showToast('分享失敗，請稍後再試', 'error');
+    }
+  }
+}
+
+function buildEventShareFlex(ev) {
+  const tags = parseTags(ev.tags !== undefined ? ev.tags : ev.tag);
+  const primaryColor = getEventPrimaryColor(ev);
+  const titleText = getEventDisplayLabel(ev);
+  const calUrl = buildLiffCalendarDateUrl(ev.start_date);
+  const sharerName = (state.user && state.user.display_name) || '成員';
+
+  let dateTimeText = ev.start_date + '（' + getWeekdayShort(ev.start_date) + '）';
+  if (ev.end_date && ev.end_date !== ev.start_date) {
+    dateTimeText += ' 至 ' + ev.end_date + '（' + getWeekdayShort(ev.end_date) + '）';
+  }
+  if (ev.start_time) {
+    dateTimeText += ' ' + ev.start_time;
+  } else if (!ev.end_date || ev.end_date === ev.start_date) {
+    dateTimeText += ' 全天';
+  }
+
+  const bodyContents = [
+    {
+      type: 'box',
+      layout: 'vertical',
+      spacing: 'xs',
+      contents: [
+        { type: 'text', text: '日期時間', size: 'xs', color: '#64748B', weight: 'bold' },
+        { type: 'text', text: dateTimeText, size: 'sm', color: '#1E293B', weight: 'bold', wrap: true },
+      ],
+    },
+  ];
+
+  if (tags.length > 0) {
+    bodyContents.push(
+      { type: 'separator', color: '#E2E8F0', margin: 'md' },
+      {
+        type: 'box',
+        layout: 'vertical',
+        spacing: 'xs',
+        margin: 'md',
+        contents: [
+          { type: 'text', text: '標籤分類', size: 'xs', color: '#64748B', weight: 'bold' },
+          { type: 'text', text: tags.join('、'), size: 'sm', color: primaryColor, weight: 'bold', wrap: true },
+        ],
+      }
+    );
+  }
+
+  const rawContent = String(ev.content || '').trim();
+  if (rawContent) {
+    const contentText = rawContent.length > 300 ? rawContent.slice(0, 300) + '…' : rawContent;
+    bodyContents.push(
+      { type: 'separator', color: '#E2E8F0', margin: 'md' },
+      {
+        type: 'box',
+        layout: 'vertical',
+        spacing: 'xs',
+        margin: 'md',
+        contents: [
+          { type: 'text', text: '行程內容', size: 'xs', color: '#64748B', weight: 'bold' },
+          { type: 'text', text: contentText, size: 'sm', color: '#334155', wrap: true },
+        ],
+      }
+    );
+  }
+
+  bodyContents.push({
+    type: 'text',
+    text: '由 ' + sharerName + ' 分享',
+    size: 'xxs',
+    color: '#94A3B8',
+    margin: 'lg',
+  });
+
+  return {
+    type: 'flex',
+    altText: '行程分享：' + titleText + '（' + ev.start_date + '）',
+    contents: {
+      type: 'bubble',
+      size: 'mega',
+      header: {
+        type: 'box',
+        layout: 'vertical',
+        backgroundColor: primaryColor,
+        paddingAll: '16px',
+        contents: [
+          {
+            type: 'text',
+            text: '家庭行事曆行程',
+            color: '#E2E8F0',
+            size: 'xs',
+            weight: 'bold',
+          },
+          {
+            type: 'text',
+            text: titleText,
+            color: '#FFFFFF',
+            size: 'lg',
+            weight: 'bold',
+            margin: 'xs',
+            wrap: true,
+          },
+        ],
+      },
+      body: {
+        type: 'box',
+        layout: 'vertical',
+        paddingAll: '16px',
+        contents: bodyContents,
+      },
+      footer: {
+        type: 'box',
+        layout: 'vertical',
+        paddingAll: '12px',
+        contents: [
+          {
+            type: 'button',
+            style: 'primary',
+            color: primaryColor,
+            height: 'sm',
+            action: {
+              type: 'uri',
+              label: '前往家庭行事曆查看',
+              uri: calUrl,
+            },
+          },
+        ],
+      },
+    },
+  };
 }
 
 // ============================================================================
@@ -1680,6 +2306,7 @@ async function handleConfirmMerge(e) {
     }
 
     showToast(`已成功合併 ${res.data.moved_count} 則照片／影片`, 'success');
+    state.loadedMonthKey = '';
     await loadAlbumPosts(1, false);
   } catch (err) {
     showToast('合併過程發生網路錯誤', 'error');
@@ -1707,6 +2334,7 @@ async function handleSavePost(e) {
     }
     closeModal('modal-post');
     showToast('相簿已更新', 'success');
+    state.loadedMonthKey = '';
     await loadAlbumPosts(1, false);
   } catch (err) {
     showToast('更新失敗，請稍後再試', 'error');
@@ -1733,6 +2361,7 @@ async function handleDeleteSingleMedia(mediaId) {
       state.editingPost.media = state.editingPost.media.filter((m) => m.media_id !== mediaId);
       renderEditPostMediaGrid();
     }
+    state.loadedMonthKey = '';
     await loadAlbumPosts(1, false);
   } catch (err) {
     showToast('刪除失敗，請稍後再試', 'error');
@@ -1756,6 +2385,7 @@ async function handleDeleteEntirePost() {
     }
     closeModal('modal-post');
     showToast('已刪除整篇貼文', 'success');
+    state.loadedMonthKey = '';
     await loadAlbumPosts(1, false);
   } catch (err) {
     showToast('刪除失敗，請稍後再試', 'error');
@@ -1812,7 +2442,7 @@ function openExternalUrl(url) {
 }
 
 // ============================================================================
-// 暱稱、自訂確認框、Toast 與共用工具
+// 暱稱、自訂確認框、Toast 與共用工具（採安全字串拼接網址）
 // ============================================================================
 async function handleSaveProfile(e) {
   e.preventDefault();
@@ -1953,6 +2583,16 @@ function getDriveViewUrl(fileId) {
   return 'https://drive.google.com/file/d/' + encodeURIComponent(fileId) + '/view';
 }
 
+function buildLiffPostUrl(postId) {
+  const id = String(CONFIG.LIFF_ID || '').trim();
+  return 'https://liff.line.me/' + encodeURIComponent(id) + '?tab=album&postId=' + encodeURIComponent(postId);
+}
+
+function buildLiffCalendarDateUrl(dateStr) {
+  const id = String(CONFIG.LIFF_ID || '').trim();
+  return 'https://liff.line.me/' + encodeURIComponent(id) + '?tab=calendar&date=' + encodeURIComponent(dateStr);
+}
+
 function toDateStr(d) {
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, '0');
@@ -1997,19 +2637,50 @@ function bindEvents() {
   if (btnViewMonth) btnViewMonth.addEventListener('click', () => setCalendarViewMode('month'));
   if (btnViewTimeline) btnViewTimeline.addEventListener('click', () => setCalendarViewMode('timeline'));
 
-  // 月份切換
+  // 跨月顯示未來 14 天開關（並記憶各成員偏好）
+  const chk14Days = document.getElementById('chk-timeline-14days');
+  if (chk14Days) {
+    chk14Days.addEventListener('change', async (e) => {
+      state.timelineNext14Mode = e.target.checked;
+      saveTimeline14Mode(state.timelineNext14Mode);
+      if (state.timelineNext14Mode) {
+        await loadUpcoming14Days(false);
+      } else if (state.loadedMonthKey !== `${state.viewYear}-${state.viewMonth}`) {
+        await loadCalendarMonth(state.viewYear, state.viewMonth);
+      } else {
+        renderCalendarTagFilter();
+        renderCalendarTimeline();
+      }
+    });
+  }
+
+  // 月份切換（手動翻閱上下月時暫時切回單月檢視，不覆寫個人 14 天偏好）
+  function exitNext14ModeTemporarily() {
+    if (state.timelineNext14Mode) {
+      state.timelineNext14Mode = false;
+      const chk = document.getElementById('chk-timeline-14days');
+      if (chk) chk.checked = false;
+    }
+  }
+
   document.getElementById('btn-prev-month').addEventListener('click', () => {
+    exitNext14ModeTemporarily();
     const prev = new Date(state.viewYear, state.viewMonth - 2, 1);
     loadCalendarMonth(prev.getFullYear(), prev.getMonth() + 1);
   });
   document.getElementById('btn-next-month').addEventListener('click', () => {
+    exitNext14ModeTemporarily();
     const next = new Date(state.viewYear, state.viewMonth, 1);
     loadCalendarMonth(next.getFullYear(), next.getMonth() + 1);
   });
-  document.getElementById('btn-today').addEventListener('click', () => {
+  document.getElementById('btn-today').addEventListener('click', async () => {
     const now = new Date();
     state.selectedDate = toDateStr(now);
-    loadCalendarMonth(now.getFullYear(), now.getMonth() + 1);
+    if (isTimelineNext14Active()) {
+      await loadUpcoming14Days(true);
+    } else {
+      await loadCalendarMonth(now.getFullYear(), now.getMonth() + 1);
+    }
   });
 
   document.getElementById('fab-add-event').addEventListener('click', () => openEventModal(null));
@@ -2022,13 +2693,18 @@ function bindEvents() {
     });
   });
 
-  // 行程表單互動
-  document.getElementById('ev-start-date').addEventListener('change', (e) => {
+  // 行程表單互動（單日行程改早或改晚開始日時，結束日自動同步跟隨）
+  const startDateInput = document.getElementById('ev-start-date');
+  startDateInput.addEventListener('change', (e) => {
     const endInput = document.getElementById('ev-end-date');
-    if (!endInput.value || endInput.value < e.target.value) {
-      endInput.value = e.target.value;
+    const prevStart = e.target.dataset.prevValue || '';
+    const newStart = e.target.value;
+    if (!endInput.value || endInput.value < newStart || (prevStart && endInput.value === prevStart)) {
+      endInput.value = newStart;
     }
+    e.target.dataset.prevValue = newStart;
   });
+
   const addTagBtn = document.getElementById('btn-add-tag');
   const newTagInput = document.getElementById('ev-tag-new-input');
   if (addTagBtn) addTagBtn.addEventListener('click', addTagsFromInput);
@@ -2040,10 +2716,21 @@ function bindEvents() {
       }
     });
   }
+
+  const copyEventBtn = document.getElementById('btn-copy-event');
+  if (copyEventBtn) copyEventBtn.addEventListener('click', convertCurrentModalToCopy);
+
+  const shareEventBtn = document.getElementById('btn-share-event');
+  if (shareEventBtn) {
+    shareEventBtn.addEventListener('click', () => {
+      if (state.editingEvent) handleShareEvent(state.editingEvent);
+    });
+  }
+
   document.getElementById('form-event').addEventListener('submit', handleSaveEvent);
   document.getElementById('btn-delete-event').addEventListener('click', handleDeleteEvent);
 
-  // 相簿搜尋、成員篩選、合併與載入更多
+  // 相簿搜尋、年月跳轉、成員篩選、合併與載入更多
   let albumSearchTimer = null;
   const searchInput = document.getElementById('album-search-input');
   const clearSearchBtn = document.getElementById('btn-clear-search');
@@ -2079,6 +2766,29 @@ function bindEvents() {
         loadAlbumPosts(1, false);
       }
       searchInput.focus();
+    });
+  }
+
+  const albumYearSel = document.getElementById('album-year-select');
+  const albumMonthSel = document.getElementById('album-month-select');
+
+  if (albumYearSel && albumMonthSel) {
+    albumYearSel.addEventListener('change', (e) => {
+      state.albumYear = e.target.value;
+      state.albumMonth = '';
+      if (state.albumYear && state.albumFilter) {
+        state.albumFilter = null;
+      }
+      renderAlbumYearMonthSelects();
+      loadAlbumPosts(1, false);
+    });
+
+    albumMonthSel.addEventListener('change', (e) => {
+      state.albumMonth = e.target.value;
+      if (state.albumMonth && state.albumFilter) {
+        state.albumFilter = null;
+      }
+      loadAlbumPosts(1, false);
     });
   }
 
