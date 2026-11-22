@@ -27,7 +27,7 @@
     <div class="state-card">
       <div class="state-icon pending"><i class="fa-solid fa-user-clock"></i></div>
       <h2>帳號等待核准中</h2>
-      <p id="pending-desc">你的 LINE 帳號已自動登記，請通知管理員至 Google 試算表將你的權限改為 <strong>active</strong>。</p>
+      <p id="pending-desc">你的 LINE 帳號已自動登記，請通知管理員至 Google 試算表將你的 Role 欄位改為 <strong>active</strong>。</p>
       <div class="pending-user-box">
         <img id="pending-avatar" class="avatar-sm hidden" alt="頭像" />
         <span id="pending-name"></span>
@@ -38,7 +38,7 @@
     </div>
   </div>
 
-  <!-- 錯誤畫面 -->
+  <!-- 錯誤與重新登入畫面 -->
   <div id="screen-error" class="fullscreen-state hidden">
     <div class="state-card">
       <div class="state-icon error"><i class="fa-solid fa-triangle-exclamation"></i></div>
@@ -97,6 +97,7 @@
           </div>
         </div>
 
+        <!-- 依標籤快速篩選列 -->
         <div id="cal-tag-filter" class="cal-tag-filter" aria-label="依標籤篩選行程"></div>
 
         <!-- 月曆格子視圖 -->
@@ -109,15 +110,25 @@
 
         <!-- 時間軸視圖 -->
         <div id="cal-timeline-view" class="timeline-view hidden">
+          <div class="timeline-mode-bar">
+            <label class="switch-label" for="chk-timeline-14days">
+              <span class="switch-control">
+                <input id="chk-timeline-14days" type="checkbox" />
+                <span class="switch-slider"></span>
+              </span>
+              <span class="switch-text">跨月顯示未來 14 天</span>
+            </label>
+            <span id="timeline-14-range" class="timeline-range-badge hidden"></span>
+          </div>
           <div id="cal-timeline-list" class="timeline-list"></div>
         </div>
       </section>
 
-      <!-- 選中日期的行程與當日相簿縮圖 -->
+      <!-- 選中日期的行程與當日相簿縮圖（月曆視圖專用） -->
       <section class="day-panel">
         <div class="day-panel-header">
           <div>
-            <h3 id="selected-date-label">2026-11-21</h3>
+            <h3 id="selected-date-label">2026-11-22</h3>
             <span id="selected-date-sub" class="sub-text"></span>
           </div>
           <button id="btn-add-event-inline" class="btn btn-outline btn-sm" type="button">
@@ -149,10 +160,10 @@
     <main id="view-album" class="view-pane hidden">
       <div class="album-tip-banner">
         <i class="fa-brands fa-line"></i>
-        <span>直接將照片或短影片傳給官方帳號，就會自動收錄到這裡。</span>
+        <span>直接將照片或 50 MB 內短影片傳給官方帳號，就會自動收錄到這裡。</span>
       </div>
 
-      <!-- 關鍵字搜尋與成員頭像篩選列 -->
+      <!-- 關鍵字搜尋、年份月份跳轉與成員頭像篩選列 -->
       <section class="album-search-panel" aria-label="搜尋與篩選相簿">
         <div class="search-input-wrap">
           <i class="fa-solid fa-magnifying-glass search-icon"></i>
@@ -166,10 +177,25 @@
             <i class="fa-solid fa-circle-xmark"></i>
           </button>
         </div>
+
+        <div class="album-ym-row">
+          <div class="ym-select-wrap">
+            <i class="fa-regular fa-calendar ym-icon"></i>
+            <select id="album-year-select" aria-label="依年份篩選相簿">
+              <option value="">全部年份</option>
+            </select>
+          </div>
+          <div class="ym-select-wrap">
+            <select id="album-month-select" aria-label="依月份篩選相簿" disabled>
+              <option value="">全部月份</option>
+            </select>
+          </div>
+        </div>
+
         <div id="album-member-filter" class="member-filter-bar" aria-label="依上傳成員篩選"></div>
       </section>
 
-      <!-- 篩選狀態列（從行事曆點擊關聯進入時顯示） -->
+      <!-- 篩選狀態列 -->
       <div id="album-filter-bar" class="filter-bar hidden">
         <span id="album-filter-label"></span>
         <button id="btn-clear-filter" class="btn btn-outline btn-xs" type="button">
@@ -199,14 +225,22 @@
     </nav>
   </div>
 
-  <!-- 彈窗 1：新增 / 編輯行程 -->
+  <!-- 彈窗 1：新增 / 編輯 / 複製行程 -->
   <div id="modal-event" class="modal-backdrop hidden" role="dialog" aria-modal="true">
     <div class="modal-sheet">
       <div class="modal-header">
         <h3 id="modal-event-title">新增行程</h3>
-        <button class="icon-btn modal-close" data-close="modal-event" type="button" aria-label="關閉">
-          <i class="fa-solid fa-xmark"></i>
-        </button>
+        <div class="modal-header-actions">
+          <button id="btn-copy-event" class="icon-btn hidden" type="button" title="複製成新行程" aria-label="複製成新行程">
+            <i class="fa-regular fa-copy"></i>
+          </button>
+          <button id="btn-share-event" class="icon-btn share-btn hidden" type="button" title="分享此行程到 LINE" aria-label="分享此行程到 LINE">
+            <i class="fa-regular fa-paper-plane"></i>
+          </button>
+          <button class="icon-btn modal-close" data-close="modal-event" type="button" aria-label="關閉">
+            <i class="fa-solid fa-xmark"></i>
+          </button>
+        </div>
       </div>
       <form id="form-event" class="modal-body">
         <input type="hidden" id="ev-id" />
@@ -266,7 +300,7 @@
     </div>
   </div>
 
-  <!-- 彈窗 2：編輯相簿貼文（日期、說明、關聯行程、單檔刪除） -->
+  <!-- 彈窗 2：編輯相簿貼文（日期、說明、關聯行程、合併、單檔刪除） -->
   <div id="modal-post" class="modal-backdrop hidden" role="dialog" aria-modal="true">
     <div class="modal-sheet">
       <div class="modal-header">
@@ -320,70 +354,7 @@
     </div>
   </div>
 
-  <!-- 彈窗 3：修改自己的暱稱 -->
-  <div id="modal-profile" class="modal-backdrop hidden" role="dialog" aria-modal="true">
-    <div class="modal-sheet modal-sm">
-      <div class="modal-header">
-        <h3>修改顯示暱稱</h3>
-        <button class="icon-btn modal-close" data-close="modal-profile" type="button" aria-label="關閉">
-          <i class="fa-solid fa-xmark"></i>
-        </button>
-      </div>
-      <form id="form-profile" class="modal-body">
-        <div class="form-group">
-          <label for="profile-name-input">暱稱</label>
-          <input id="profile-name-input" type="text" maxlength="20" required />
-        </div>
-        <div class="modal-footer">
-          <div></div>
-          <div class="footer-right">
-            <button class="btn btn-outline modal-close" data-close="modal-profile" type="button">取消</button>
-            <button id="btn-save-profile" class="btn btn-primary" type="submit">儲存</button>
-          </div>
-        </div>
-      </form>
-    </div>
-  </div>
-
-  <!-- 彈窗 4：大圖燈箱預覽（點擊再開 Drive 原圖） -->
-  <div id="modal-lightbox" class="lightbox-backdrop hidden" role="dialog" aria-modal="true">
-    <div class="lightbox-topbar">
-      <span id="lightbox-info">照片預覽</span>
-      <button id="btn-close-lightbox" class="lightbox-close" type="button" aria-label="關閉預覽">
-        <i class="fa-solid fa-xmark"></i>
-      </button>
-    </div>
-    <div class="lightbox-stage">
-      <div id="lightbox-spinner" class="spinner light"></div>
-      <img id="lightbox-img" class="hidden" alt="相簿大圖預覽" />
-    </div>
-    <div class="lightbox-footer">
-      <button id="btn-open-original" class="btn btn-outline" type="button">
-        <i class="fa-solid fa-arrow-up-right-from-square"></i> 開啟 Google 雲端原檔
-      </button>
-    </div>
-  </div>
-
-  <!-- 彈窗 5：自訂確認對話框 -->
-  <div id="modal-confirm" class="modal-backdrop hidden" role="dialog" aria-modal="true">
-    <div class="modal-sheet modal-sm">
-      <div class="modal-header">
-        <h3 id="confirm-title">確認操作</h3>
-      </div>
-      <div class="modal-body">
-        <p id="confirm-message" class="confirm-text"></p>
-        <div class="modal-footer">
-          <div></div>
-          <div class="footer-right">
-            <button id="btn-confirm-cancel" class="btn btn-outline" type="button">取消</button>
-            <button id="btn-confirm-ok" class="btn btn-danger" type="button">確定刪除</button>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- 彈窗 6：合併照片／影片至另一篇相簿 -->
+  <!-- 彈窗 3：合併照片／影片至另一篇相簿 -->
   <div id="modal-merge" class="modal-backdrop hidden" role="dialog" aria-modal="true">
     <div class="modal-sheet modal-sm">
       <div class="modal-header">
@@ -419,6 +390,69 @@
           </div>
         </div>
       </form>
+    </div>
+  </div>
+
+  <!-- 彈窗 4：修改自己的暱稱 -->
+  <div id="modal-profile" class="modal-backdrop hidden" role="dialog" aria-modal="true">
+    <div class="modal-sheet modal-sm">
+      <div class="modal-header">
+        <h3>修改顯示暱稱</h3>
+        <button class="icon-btn modal-close" data-close="modal-profile" type="button" aria-label="關閉">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+      </div>
+      <form id="form-profile" class="modal-body">
+        <div class="form-group">
+          <label for="profile-name-input">暱稱</label>
+          <input id="profile-name-input" type="text" maxlength="20" required />
+        </div>
+        <div class="modal-footer">
+          <div></div>
+          <div class="footer-right">
+            <button class="btn btn-outline modal-close" data-close="modal-profile" type="button">取消</button>
+            <button id="btn-save-profile" class="btn btn-primary" type="submit">儲存</button>
+          </div>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- 彈窗 5：大圖燈箱預覽（點擊再開 Drive 原圖） -->
+  <div id="modal-lightbox" class="lightbox-backdrop hidden" role="dialog" aria-modal="true">
+    <div class="lightbox-topbar">
+      <span id="lightbox-info">照片預覽</span>
+      <button id="btn-close-lightbox" class="lightbox-close" type="button" aria-label="關閉預覽">
+        <i class="fa-solid fa-xmark"></i>
+      </button>
+    </div>
+    <div class="lightbox-stage">
+      <div id="lightbox-spinner" class="spinner light"></div>
+      <img id="lightbox-img" class="hidden" alt="相簿大圖預覽" />
+    </div>
+    <div class="lightbox-footer">
+      <button id="btn-open-original" class="btn btn-outline" type="button">
+        <i class="fa-solid fa-arrow-up-right-from-square"></i> 開啟 Google 雲端原檔
+      </button>
+    </div>
+  </div>
+
+  <!-- 彈窗 6：自訂確認對話框 -->
+  <div id="modal-confirm" class="modal-backdrop hidden" role="dialog" aria-modal="true">
+    <div class="modal-sheet modal-sm">
+      <div class="modal-header">
+        <h3 id="confirm-title">確認操作</h3>
+      </div>
+      <div class="modal-body">
+        <p id="confirm-message" class="confirm-text"></p>
+        <div class="modal-footer">
+          <div></div>
+          <div class="footer-right">
+            <button id="btn-confirm-cancel" class="btn btn-outline" type="button">取消</button>
+            <button id="btn-confirm-ok" class="btn btn-danger" type="button">確定刪除</button>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 
