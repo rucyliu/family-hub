@@ -468,12 +468,12 @@ body {
   min-width: 0;
   font-size: 10px;
   line-height: 1.35;
-  padding: 1px 4px;
+  padding: 1px 3px;
   border-radius: 3px;
   color: #fff;
   white-space: nowrap;
   overflow: hidden;
-  text-overflow: ellipsis;
+  text-overflow: clip;
 }
 
 .cal-more {
@@ -1333,4 +1333,186 @@ body {
 
 .tag-add-row input {
   flex: 1;
+}
+
+/* ===== 行事曆視圖切換與時間軸 ===== */
+.cal-toolbar {
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.cal-toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.view-toggle {
+  display: inline-flex;
+  background: #f1f5f9;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 2px;
+}
+
+.view-toggle-btn {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 5px 9px;
+  border-radius: 7px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.view-toggle-btn.active {
+  background: #ffffff;
+  color: var(--primary);
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.1);
+}
+
+.timeline-view {
+  padding-top: 6px;
+}
+
+.timeline-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.timeline-day-group {
+  display: grid;
+  grid-template-columns: 58px 1fr;
+  gap: 10px;
+  align-items: start;
+}
+
+.timeline-date-col {
+  text-align: center;
+  padding: 6px 4px;
+  border-radius: 10px;
+  background: #f8fafc;
+  border: 1px solid var(--border);
+  position: sticky;
+  top: 62px;
+}
+
+.timeline-date-col.is-today {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #ffffff;
+}
+
+.timeline-date-md {
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.timeline-date-wk {
+  font-size: 11px;
+  opacity: 0.8;
+  margin-top: 2px;
+}
+
+.timeline-day-cam {
+  margin-top: 5px;
+  border: none;
+  background: rgba(2, 132, 199, 0.12);
+  color: #0284c7;
+  border-radius: 999px;
+  padding: 2px 6px;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.timeline-date-col.is-today .timeline-day-cam {
+  background: rgba(255, 255, 255, 0.22);
+  color: #ffffff;
+}
+
+.timeline-events-col {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-left: 10px;
+  border-left: 2px solid var(--border);
+  min-width: 0;
+}
+
+/* ===== 相簿卡片操作列（分享通知＋編輯） ===== */
+.post-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.icon-btn.share-btn {
+  color: var(--primary);
+  border-color: #bfdbfe;
+  background: var(--primary-soft);
+}
+
+.icon-btn.share-btn:hover {
+  background: #dbeafe;
+}
+
+.icon-btn.share-btn.shared-today {
+  color: var(--muted);
+  border-color: var(--border);
+  background: #f8fafc;
+  opacity: 0.65;
+}
+
+/* ===== 相簿編輯：合併與單檔移動按鈕 ===== */
+.label-with-action {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.label-with-action label {
+  margin-bottom: 0;
+}
+
+.edit-media-move {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(29, 78, 216, 0.9);
+  color: #fff;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.merge-desc {
+  margin: 0 0 12px;
+  font-size: 13px;
+  color: #334155;
+  background: #f8fafc;
+  border: 1px solid var(--border);
+  padding: 9px 11px;
+  border-radius: 9px;
+}
+
+.checkbox-inline {
+  display: flex !important;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.checkbox-inline input[type="checkbox"] {
+  width: auto;
 }
