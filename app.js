@@ -24,10 +24,7 @@ const state = {
   idToken: '',
   user: null,
   usersMap: {},
-  features: {
-    groupShareEnabled: false,
-    groupSharedToday: false,
-  },
+  canSharePicker: false,
   currentTab: 'calendar',
   isReloggingIn: false,
 
@@ -124,10 +121,7 @@ async function verifyMemberAndBoot() {
 
   state.user = res.data.user;
   state.usersMap = res.data.usersMap || {};
-  state.features = Object.assign(
-    { groupShareEnabled: false, groupSharedToday: false },
-    res.data.features || {}
-  );
+  state.canSharePicker = typeof liff !== 'undefined' && liff.isApiAvailable('shareTargetPicker');
 
   renderHeaderProfile();
   renderAlbumMemberFilter();
@@ -1070,9 +1064,6 @@ async function loadAlbumPosts(page = 1, append = false) {
     state.albumPage = res.data.page || page;
     state.albumTotal = Number(res.data.total || 0);
     state.albumHasMore = Boolean(res.data.hasMore);
-    if (typeof res.data.groupSharedToday === 'boolean') {
-      state.features.groupSharedToday = res.data.groupSharedToday;
-    }
     state.albumLoadedOnce = true;
 
     if (append) {
@@ -1168,16 +1159,14 @@ function renderAlbumList() {
     const actionsWrap = document.createElement('div');
     actionsWrap.className = 'post-header-actions';
 
-    // 只有當管理員設定了 LINE_GROUP_ID 時才顯示發送群組通知按鈕
-    if (state.features.groupShareEnabled) {
+    // 只要 LIFF 支援 shareTargetPicker 即顯示分享按鈕
+    if (state.canSharePicker) {
       const shareBtn = document.createElement('button');
       shareBtn.type = 'button';
-      shareBtn.className = 'icon-btn share-btn' + (state.features.groupSharedToday ? ' shared-today' : '');
-      shareBtn.title = state.features.groupSharedToday
-        ? '今日已發送過群組相簿通知（每天限一次）'
-        : '發送相簿更新通知到家庭群組';
+      shareBtn.className = 'icon-btn share-btn';
+      shareBtn.title = '分享相簿卡片到 LINE 群組或好友';
       shareBtn.innerHTML = '<i class="fa-regular fa-paper-plane"></i>';
-      shareBtn.addEventListener('click', () => handleSharePostToGroup(post));
+      shareBtn.addEventListener('click', () => handleSharePost(post));
       actionsWrap.appendChild(shareBtn);
     }
 
@@ -1241,37 +1230,159 @@ function renderAlbumList() {
   loadMoreWrap.classList.toggle('hidden', !state.albumHasMore);
 }
 
-async function handleSharePostToGroup(post) {
-  if (state.features.groupSharedToday) {
-    showToast('今天已經發送過群組相簿通知囉（每天限發送一次）', 'info');
+async function handleSharePost(post) {
+  if (typeof liff === 'undefined' || !liff.isApiAvailable('shareTargetPicker')) {
+    showToast('目前開啟的環境不支援 LINE 分享選單，請改由手機 LINE 開啟', 'info');
     return;
   }
 
-  const ok = await showConfirm(
-    '發送相簿通知到家庭群組',
-    `確定要將這篇「${post.post_date}」的生活相簿分享卡片發送到群組嗎？\n（全體成員每天限發送一次）`,
-    '確定發送',
-    false
-  );
-  if (!ok) return;
-
   try {
-    const res = await apiCall('shareAlbumPostToGroup', { post_id: post.post_id });
-    if (!res.ok) {
-      if (res.code === 'DAILY_LIMIT_REACHED') {
-        state.features.groupSharedToday = true;
-        renderAlbumList();
-      }
-      if (res.code !== 'UNAUTHORIZED') showToast(res.message || '發送通知失敗', 'error');
-      return;
+    const flexMessage = buildAlbumShareFlex(post);
+    const res = await liff.shareTargetPicker([flexMessage], { isMultiple: true });
+    // 使用者實際送出後 res 會有回傳值；若中途關閉選單取消分享，res 為 undefined 不顯示錯誤
+    if (res) {
+      showToast('已成功分享生活相簿卡片！', 'success');
     }
-
-    state.features.groupSharedToday = true;
-    renderAlbumList();
-    showToast('已發送相簿更新通知到家庭群組！', 'success');
   } catch (err) {
-    showToast('網路錯誤，無法發送群組通知', 'error');
+    console.error('shareTargetPicker 失敗:', err);
+    const errMsg = String((err && err.message) || '');
+    if (err && (err.code === 'FORBIDDEN' || errMsg.toLowerCase().includes('permission') || errMsg.toLowerCase().includes('enable'))) {
+      showToast('分享功能未啟用，請到 LINE Developers 後台開啟 LIFF 的 Share target picker', 'error');
+    } else {
+      showToast('分享失敗，請稍後再試', 'error');
+    }
   }
+}
+
+function buildLiffPostUrl(postId) {
+  const id = String(CONFIG.LIFF_ID || '').trim();
+  return `https://liff.line.me/${encodeURIComponent(id)}?tab=album&postId=${encodeURIComponent(postId)}`;
+}
+
+/**
+ * 在前端組裝生活相簿分享 Flex Message（含封面縮圖、日期、關聯行程、摘要與直達網址）
+ */
+function buildAlbumShareFlex(post) {
+  const postUrl = buildLiffPostUrl(post.post_id);
+  const media = Array.isArray(post.media) ? post.media : [];
+  const firstMedia = media.length > 0 ? media[0] : null;
+
+  let heroUrl = '';
+  if (firstMedia) {
+    const thumbId = firstMedia.media_type === 'video'
+      ? (firstMedia.thumb_file_id || firstMedia.drive_file_id)
+      : firstMedia.drive_file_id;
+    if (thumbId) {
+      heroUrl = getDriveThumbUrl(thumbId, 1000);
+    }
+  }
+
+  const authorName = (post.author && post.author.display_name) || '成員';
+  const sharerName = (state.user && state.user.display_name) || authorName;
+  const rawCaption = String(post.caption || '').trim();
+  const captionSnippet = rawCaption
+    ? (rawCaption.length > 160 ? rawCaption.slice(0, 160) + '…' : rawCaption)
+    : '新增了生活回憶，點擊下方按鈕前往相簿查看完整照片與影片！';
+
+  const bodyContents = [
+    {
+      type: 'text',
+      text: '生活相簿更新通知',
+      size: 'xs',
+      weight: 'bold',
+      color: '#1D4ED8',
+    },
+    {
+      type: 'text',
+      text: `${post.post_date || '生活紀錄'}｜${authorName}（共 ${media.length} 則媒體）`,
+      size: 'sm',
+      weight: 'bold',
+      color: '#1E293B',
+      margin: 'xs',
+      wrap: true,
+    },
+  ];
+
+  if (post.linked_event) {
+    const eventLabel = getEventDisplayLabel(post.linked_event);
+    if (eventLabel) {
+      bodyContents.push({
+        type: 'text',
+        text: `關聯行程：${eventLabel}`,
+        size: 'xs',
+        color: '#0369A1',
+        margin: 'xs',
+        wrap: true,
+      });
+    }
+  }
+
+  bodyContents.push(
+    {
+      type: 'text',
+      text: captionSnippet,
+      size: 'sm',
+      color: '#334155',
+      margin: 'md',
+      wrap: true,
+    },
+    {
+      type: 'text',
+      text: `由 ${sharerName} 分享`,
+      size: 'xxs',
+      color: '#94A3B8',
+      margin: 'md',
+    }
+  );
+
+  const bubble = {
+    type: 'bubble',
+    size: 'mega',
+    body: {
+      type: 'box',
+      layout: 'vertical',
+      paddingAll: '16px',
+      contents: bodyContents,
+    },
+    footer: {
+      type: 'box',
+      layout: 'vertical',
+      paddingAll: '12px',
+      contents: [
+        {
+          type: 'button',
+          style: 'primary',
+          color: '#1D4ED8',
+          height: 'sm',
+          action: {
+            type: 'uri',
+            label: '前往生活相簿查看',
+            uri: postUrl,
+          },
+        },
+      ],
+    },
+  };
+
+  if (heroUrl) {
+    bubble.hero = {
+      type: 'image',
+      url: heroUrl,
+      size: 'full',
+      aspectRatio: '16:10',
+      aspectMode: 'cover',
+      action: {
+        type: 'uri',
+        uri: postUrl,
+      },
+    };
+  }
+
+  return {
+    type: 'flex',
+    altText: `${sharerName} 分享了一篇生活相簿（${post.post_date || ''}）`,
+    contents: bubble,
+  };
 }
 
 function appendMediaThumbElement(container, media, dateLabel) {
