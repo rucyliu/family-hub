@@ -1671,6 +1671,67 @@ function updateAlbumFilterBar(showCount) {
   filterBar.classList.remove('hidden');
 }
 
+/**
+ * 將內文中的 #關鍵字 轉為可點擊按鈕，其餘文字保留原始換行
+ */
+function appendCaptionWithHashtags(container, text) {
+  const str = String(text || '');
+  const hashtagRegex = /#([^\s#，。、！？,.;:：()（）\[\]【】]+)/g;
+  let lastIdx = 0;
+  let match;
+
+  while ((match = hashtagRegex.exec(str)) !== null) {
+    if (match.index > lastIdx) {
+      container.appendChild(document.createTextNode(str.slice(lastIdx, match.index)));
+    }
+
+    const fullTag = match[0]; // 例如 "#晴天"
+    const tagBtn = document.createElement('button');
+    tagBtn.type = 'button';
+    tagBtn.className = 'post-hashtag';
+    tagBtn.textContent = fullTag;
+    tagBtn.title = `點擊搜尋「${fullTag}」`;
+    tagBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      applyHashtagToSearch(fullTag);
+    });
+    container.appendChild(tagBtn);
+
+    lastIdx = hashtagRegex.lastIndex;
+  }
+
+  if (lastIdx < str.length) {
+    container.appendChild(document.createTextNode(str.slice(lastIdx)));
+  }
+}
+
+/**
+ * 點擊內文 #關鍵字：帶入搜尋輸入框並直接執行搜尋
+ */
+function applyHashtagToSearch(tagText) {
+  const searchInput = document.getElementById('album-search-input');
+  const clearSearchBtn = document.getElementById('btn-clear-search');
+  if (searchInput) {
+    searchInput.value = tagText;
+  }
+  if (clearSearchBtn) {
+    clearSearchBtn.classList.remove('hidden');
+  }
+  // 若原本處於單篇分享跳轉模式，改搜關鍵字時解除單篇鎖定才能找出所有相關貼文
+  if (state.albumFilter && state.albumFilter.type === 'post') {
+    state.albumFilter = null;
+  }
+  state.albumKeyword = tagText;
+  loadAlbumPosts(1, false);
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+function formatShortDateTime(val) {
+  const s = String(val || '').trim();
+  // 將 "YYYY-MM-DD HH:mm:ss" 精簡為 "YYYY-MM-DD HH:mm"
+  return s.length >= 16 ? s.slice(0, 16) : s;
+}
+
 function renderAlbumList() {
   const listEl = document.getElementById('album-list');
   const loadMoreWrap = document.getElementById('album-load-more-wrap');
@@ -1772,7 +1833,7 @@ function renderAlbumList() {
     if (post.caption) {
       const cap = document.createElement('p');
       cap.className = 'post-caption';
-      cap.textContent = post.caption;
+      appendCaptionWithHashtags(cap, post.caption);
       card.appendChild(cap);
     }
 
@@ -1789,6 +1850,24 @@ function renderAlbumList() {
         grid.appendChild(tile);
       });
       card.appendChild(grid);
+    }
+
+    const editorName =
+      post.updated_by_name ||
+      state.usersMap[post.updated_by]?.display_name ||
+      (post.author && post.author.display_name) ||
+      '成員';
+    const editedTime = formatShortDateTime(post.updated_at);
+    if (editorName || editedTime) {
+      const footerMeta = document.createElement('div');
+      footerMeta.className = 'post-footer-meta';
+      footerMeta.innerHTML = '<i class="fa-regular fa-clock"></i>';
+      const metaText = document.createElement('span');
+      metaText.textContent = editedTime
+        ? `最後編輯：${editorName}（${editedTime}）`
+        : `最後編輯：${editorName}`;
+      footerMeta.appendChild(metaText);
+      card.appendChild(footerMeta);
     }
 
     listEl.appendChild(card);
@@ -2465,6 +2544,9 @@ async function handleSaveProfile(e) {
       if (p.created_by === state.user.user_id && p.author) {
         p.author.display_name = name;
       }
+      if (p.updated_by === state.user.user_id) {
+        p.updated_by_name = name;
+      }
     });
 
     renderHeaderProfile();
@@ -2730,35 +2812,33 @@ function bindEvents() {
   document.getElementById('form-event').addEventListener('submit', handleSaveEvent);
   document.getElementById('btn-delete-event').addEventListener('click', handleDeleteEvent);
 
-  // 相簿搜尋、年月跳轉、成員篩選、合併與載入更多
-  let albumSearchTimer = null;
+  // 相簿手動搜尋（點擊「搜尋」按鈕或按 Enter 才呼叫 GAS，打字過程不發送請求）
   const searchInput = document.getElementById('album-search-input');
   const clearSearchBtn = document.getElementById('btn-clear-search');
+  const searchSubmitBtn = document.getElementById('btn-album-search');
+
+  function executeAlbumSearch() {
+    if (!searchInput) return;
+    const val = searchInput.value.trim();
+    if (clearSearchBtn) clearSearchBtn.classList.toggle('hidden', !val);
+    state.albumKeyword = val;
+    loadAlbumPosts(1, false);
+  }
 
   if (searchInput && clearSearchBtn) {
     searchInput.addEventListener('input', (e) => {
       const val = e.target.value.trim();
       clearSearchBtn.classList.toggle('hidden', !val);
-
-      clearTimeout(albumSearchTimer);
-      albumSearchTimer = setTimeout(() => {
-        if (state.albumKeyword === val) return;
-        state.albumKeyword = val;
-        loadAlbumPosts(1, false);
-      }, 400);
     });
 
     searchInput.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
         e.preventDefault();
-        clearTimeout(albumSearchTimer);
-        state.albumKeyword = searchInput.value.trim();
-        loadAlbumPosts(1, false);
+        executeAlbumSearch();
       }
     });
 
     clearSearchBtn.addEventListener('click', () => {
-      clearTimeout(albumSearchTimer);
       searchInput.value = '';
       clearSearchBtn.classList.add('hidden');
       if (state.albumKeyword) {
@@ -2767,6 +2847,10 @@ function bindEvents() {
       }
       searchInput.focus();
     });
+  }
+
+  if (searchSubmitBtn) {
+    searchSubmitBtn.addEventListener('click', executeAlbumSearch);
   }
 
   const albumYearSel = document.getElementById('album-year-select');
@@ -2793,7 +2877,6 @@ function bindEvents() {
   }
 
   document.getElementById('btn-clear-filter').addEventListener('click', () => {
-    clearTimeout(albumSearchTimer);
     resetAllAlbumFilters();
     loadAlbumPosts(1, false);
   });
