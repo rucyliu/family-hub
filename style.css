@@ -1748,3 +1748,66 @@ body {
   display: flex;
   justify-content: center;
 }
+
+/* ===== 相簿手動搜尋按鈕列 ===== */
+.search-bar-row {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.search-bar-row .search-input-wrap {
+  flex: 1;
+  min-width: 0;
+  margin-bottom: 0;
+}
+
+.search-submit-btn {
+  flex-shrink: 0;
+  padding: 0 14px;
+  white-space: nowrap;
+}
+
+/* ===== 貼文內文 #關鍵字 樣式 ===== */
+.post-hashtag {
+  display: inline-block;
+  border: 1px solid #bfdbfe;
+  background: var(--primary-soft);
+  color: var(--primary);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+  padding: 1px 7px;
+  margin: 0 2px;
+  border-radius: 999px;
+  cursor: pointer;
+  vertical-align: baseline;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.post-hashtag:hover {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #ffffff;
+}
+
+/* ===== 貼文右下角：最後編輯者與時間 ===== */
+.post-footer-meta {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border);
+  font-size: 11px;
+  color: var(--muted);
+  text-align: right;
+}
+
+.post-footer-meta i {
+  font-size: 11px;
+  opacity: 0.85;
+}
