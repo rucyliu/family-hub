@@ -155,45 +155,73 @@
     <!-- 分頁 2：生活相簿 -->
     <main id="view-album" class="view-pane hidden">
       <div class="album-tip-banner">
-        <i class="fa-brands fa-line"></i>
-        <span>直接將照片或 50 MB 內短影片傳給官方帳號，就會自動收錄到這裡。</span>
+        <div class="album-tip-main">
+          <i class="fa-brands fa-line"></i>
+          <span>直接將照片或 50 MB 內短影片傳給官方帳號，就會自動收錄到這裡。</span>
+        </div>
+        <button id="btn-open-oa" class="btn btn-oa btn-xs" type="button">
+          <i class="fa-regular fa-comment-dots"></i> 開啟官方帳號
+        </button>
       </div>
 
-      <!-- 關鍵字搜尋、年份月份跳轉與成員頭像篩選列 -->
-      <section class="album-search-panel" aria-label="搜尋與篩選相簿">
-        <div class="search-bar-row">
-          <div class="search-input-wrap">
-            <i class="fa-solid fa-magnifying-glass search-icon"></i>
-            <input
-              id="album-search-input"
-              type="search"
-              placeholder="搜尋日記文字、#標籤或關聯行程..."
-              autocomplete="off"
-            />
-            <button id="btn-clear-search" class="search-clear-btn hidden" type="button" aria-label="清除搜尋文字">
-              <i class="fa-solid fa-circle-xmark"></i>
+      <!-- 搜尋與篩選區塊（預設收合） -->
+      <section id="album-search-panel" class="album-search-panel" aria-label="搜尋與篩選相簿">
+        <button id="btn-toggle-album-search" class="album-search-toggle" type="button" aria-expanded="false">
+          <span class="album-search-toggle-left">
+            <i class="fa-solid fa-magnifying-glass"></i>
+            <span>搜尋與篩選</span>
+            <span id="album-search-active-badge" class="search-active-badge hidden">已篩選</span>
+          </span>
+          <span class="album-search-toggle-right">
+            <span id="album-search-toggle-text">展開</span>
+            <i id="album-search-toggle-icon" class="fa-solid fa-chevron-down"></i>
+          </span>
+        </button>
+
+        <div id="album-search-body" class="album-search-body hidden">
+          <div class="search-bar-row">
+            <div class="search-input-wrap">
+              <i class="fa-solid fa-magnifying-glass search-icon"></i>
+              <input
+                id="album-search-input"
+                type="search"
+                placeholder="搜尋日記文字、#標籤或關聯行程..."
+                autocomplete="off"
+              />
+              <button id="btn-clear-search" class="search-clear-btn hidden" type="button" aria-label="清除搜尋文字">
+                <i class="fa-solid fa-circle-xmark"></i>
+              </button>
+            </div>
+            <button id="btn-album-search" class="btn btn-primary search-submit-btn" type="button">
+              <i class="fa-solid fa-magnifying-glass"></i> 搜尋
             </button>
           </div>
-          <button id="btn-album-search" class="btn btn-primary search-submit-btn" type="button">
-            <i class="fa-solid fa-magnifying-glass"></i> 搜尋
-          </button>
-        </div>
 
-        <div class="album-ym-row">
-          <div class="ym-select-wrap">
-            <i class="fa-regular fa-calendar ym-icon"></i>
-            <select id="album-year-select" aria-label="依年份篩選相簿">
-              <option value="">全部年份</option>
-            </select>
+          <div class="album-ym-row">
+            <div class="ym-select-wrap">
+              <i class="fa-regular fa-calendar ym-icon"></i>
+              <select id="album-year-select" aria-label="依年份篩選相簿">
+                <option value="">全部年份</option>
+              </select>
+            </div>
+            <div class="ym-select-wrap">
+              <select id="album-month-select" aria-label="依月份篩選相簿" disabled>
+                <option value="">全部月份</option>
+              </select>
+            </div>
           </div>
-          <div class="ym-select-wrap">
-            <select id="album-month-select" aria-label="依月份篩選相簿" disabled>
-              <option value="">全部月份</option>
-            </select>
-          </div>
-        </div>
 
-        <div id="album-member-filter" class="member-filter-bar" aria-label="依上傳成員篩選"></div>
+          <div id="album-member-filter" class="member-filter-bar" aria-label="依上傳成員篩選"></div>
+        </div>
+      </section>
+
+      <!-- 貼文標籤快速篩選區塊 -->
+      <section id="album-hashtag-section" class="album-hashtag-section hidden" aria-label="貼文標籤篩選">
+        <div class="album-hashtag-header">
+          <i class="fa-solid fa-tags"></i>
+          <span>貼文標籤</span>
+        </div>
+        <div id="album-hashtag-bar" class="album-hashtag-bar"></div>
       </section>
 
       <!-- 篩選狀態列 -->
@@ -326,8 +354,14 @@
         </div>
 
         <div class="form-group">
-          <label for="post-caption">文字說明（支援換行）</label>
-          <textarea id="post-caption" rows="4" placeholder="寫下今天發生的趣事或拍攝地點..."></textarea>
+          <label for="post-caption">文字說明（支援換行與 #標籤）</label>
+          <textarea id="post-caption" rows="4" placeholder="寫下今天發生的趣事、地點或 #標籤..."></textarea>
+          <div id="post-edit-hashtags-wrap" class="post-edit-hashtags hidden">
+            <div class="post-edit-hashtags-label">
+              <i class="fa-solid fa-tags"></i> 快速加入已有標籤（點一下插入／再次點擊移除）
+            </div>
+            <div id="post-edit-hashtag-chips" class="post-edit-hashtag-chips"></div>
+          </div>
         </div>
 
         <div class="form-group">
