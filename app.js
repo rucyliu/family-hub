@@ -5,6 +5,7 @@
 const CONFIG = {
   LIFF_ID: '2012740107-BWMenJbV',
   GAS_API_URL: 'https://script.google.com/macros/s/AKfycbwuKl5ZZD5OlEM9oND5WEtFKOudhO8cTqJkegxjKfm0_uQ0J3kkGI8qIWtcGpePTk0rsg/exec',
+  LINE_OA_ID: '@313cvefu',        // 選填：留空則自動由 GAS 讀取官方帳號 @BasicID
   PAGE_SIZE: 10,         // 單頁載入篇數（減少初次進入相簿的縮圖與 API 流量）
   THUMB_WIDTH: 240,      // 照片縮圖全站統一寬度（行事曆、相簿、編輯彈窗共用快取）
   VIDEO_THUMB_WIDTH: 400 // 影片縮圖全站統一寬度（優先取 Drive 高清影片截圖並共用快取）
@@ -31,6 +32,7 @@ const state = {
   idToken: '',
   user: null,
   usersMap: {},
+  oaBasicId: '',             // 官方帳號 @BasicID（由 GAS getMe 回傳）
   currentTab: 'calendar',
   isReloggingIn: false,
 
@@ -52,19 +54,21 @@ const state = {
   albumPage: 1,
   albumHasMore: false,
   albumLoadedOnce: false,
-  albumFilter: null,         // { type: 'event'|'date'|'post', value, label }
+  albumSearchExpanded: false, // 搜尋與篩選區塊預設收合
+  albumFilter: null,          // { type: 'event'|'date'|'post', value, label }
   albumKeyword: '',
   albumAuthorId: '',
   albumYear: '',
   albumMonth: '',
   albumMonthCounts: {},
+  albumHashtags: [],          // [{ tag: '#晴天', count: 3 }, ...]
   albumTotal: 0,
   albumReqSeq: 0,
 
   // 彈窗暫存
   editingEvent: null,
   editingPost: null,
-  mergeContext: null,        // { sourcePostId, mediaId }
+  mergeContext: null,         // { sourcePostId, mediaId }
   confirmResolver: null,
   confirmOnOk: null,
 };
@@ -132,6 +136,7 @@ async function verifyMemberAndBoot() {
 
   state.user = res.data.user;
   state.usersMap = res.data.usersMap || {};
+  state.oaBasicId = (res.data && res.data.oaBasicId) || CONFIG.LINE_OA_ID || '';
 
   renderHeaderProfile();
   renderAlbumMemberFilter();
@@ -897,7 +902,7 @@ function getEventsForDate(dateStr) {
 }
 
 /**
- * 行程卡片：右上僅顯示純圖示分享按鈕，點擊卡片本體開啟編輯視窗（內含複製／分享／刪除）
+ * 行程卡片：右上角共用 icon-btn share-btn 純圖示分享鈕，點擊卡片開啟編輯視窗
  */
 function buildEventCardElement(ev, timelineMeta = null) {
   const tags = parseTags(ev.tags !== undefined ? ev.tags : ev.tag);
@@ -1303,8 +1308,110 @@ async function handleDeleteEvent() {
 }
 
 // ============================================================================
-// 分頁 2：生活相簿（手動搜尋、#關鍵字點擊、年月跳轉、最後編輯者、統一快取縮圖）
+// 分頁 2：生活相簿（官方帳號捷徑、收合搜尋、貼文標籤快篩、最後編輯者、統一縮圖）
 // ============================================================================
+function openOfficialAccountChat() {
+  let oaId = String(state.oaBasicId || CONFIG.LINE_OA_ID || '').trim();
+  if (!oaId) {
+    showToast('尚未取得官方帳號 ID，請確認 GAS 已更新部署', 'error');
+    return;
+  }
+  if (!oaId.startsWith('@')) {
+    oaId = '@' + oaId;
+  }
+
+  const isInLine = typeof liff !== 'undefined' && liff.isInClient();
+  const targetUrl = isInLine
+    ? ('https://line.me/R/oaMessage/' + encodeURIComponent(oaId) + '/')
+    : ('https://line.me/R/ti/p/' + encodeURIComponent(oaId));
+
+  openExternalUrl(targetUrl);
+}
+
+function setAlbumSearchExpanded(expanded) {
+  state.albumSearchExpanded = Boolean(expanded);
+  const body = document.getElementById('album-search-body');
+  const toggleBtn = document.getElementById('btn-toggle-album-search');
+  const toggleText = document.getElementById('album-search-toggle-text');
+  const toggleIcon = document.getElementById('album-search-toggle-icon');
+
+  if (body) body.classList.toggle('hidden', !state.albumSearchExpanded);
+  if (toggleBtn) toggleBtn.setAttribute('aria-expanded', String(state.albumSearchExpanded));
+  if (toggleText) toggleText.textContent = state.albumSearchExpanded ? '收合' : '展開';
+  if (toggleIcon) {
+    toggleIcon.className = state.albumSearchExpanded
+      ? 'fa-solid fa-chevron-up'
+      : 'fa-solid fa-chevron-down';
+  }
+}
+
+function updateAlbumSearchActiveBadge() {
+  const badge = document.getElementById('album-search-active-badge');
+  if (!badge) return;
+  const hasSearchPanelFilter = Boolean(
+    state.albumKeyword || state.albumYear || state.albumAuthorId
+  );
+  badge.classList.toggle('hidden', !hasSearchPanelFilter);
+}
+
+function renderAlbumHashtagBar() {
+  const section = document.getElementById('album-hashtag-section');
+  const bar = document.getElementById('album-hashtag-bar');
+  if (!section || !bar) return;
+
+  const list = Array.isArray(state.albumHashtags) ? state.albumHashtags : [];
+  if (list.length === 0) {
+    section.classList.add('hidden');
+    bar.innerHTML = '';
+    return;
+  }
+
+  section.classList.remove('hidden');
+  bar.innerHTML = '';
+
+  const currentKw = String(state.albumKeyword || '').trim().toLowerCase();
+
+  list.forEach((item) => {
+    const isActive = currentKw === item.tag.toLowerCase();
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'album-hashtag-chip' + (isActive ? ' active' : '');
+
+    const label = document.createElement('span');
+    label.textContent = item.tag;
+    btn.appendChild(label);
+
+    const cnt = document.createElement('span');
+    cnt.className = 'album-hashtag-count';
+    cnt.textContent = `(${item.count})`;
+    btn.appendChild(cnt);
+
+    btn.addEventListener('click', () => {
+      const searchInput = document.getElementById('album-search-input');
+      const clearSearchBtn = document.getElementById('btn-clear-search');
+
+      if (isActive) {
+        state.albumKeyword = '';
+        if (searchInput) searchInput.value = '';
+        if (clearSearchBtn) clearSearchBtn.classList.add('hidden');
+      } else {
+        if (state.albumFilter && state.albumFilter.type === 'post') {
+          state.albumFilter = null;
+        }
+        state.albumKeyword = item.tag;
+        if (searchInput) searchInput.value = item.tag;
+        if (clearSearchBtn) clearSearchBtn.classList.remove('hidden');
+      }
+
+      renderAlbumHashtagBar();
+      updateAlbumSearchActiveBadge();
+      loadAlbumPosts(1, false);
+    });
+
+    bar.appendChild(btn);
+  });
+}
+
 function renderAlbumMemberFilter() {
   const bar = document.getElementById('album-member-filter');
   if (!bar) return;
@@ -1426,6 +1533,8 @@ function resetAllAlbumFilters() {
   if (clearBtn) clearBtn.classList.add('hidden');
   renderAlbumYearMonthSelects();
   renderAlbumMemberFilter();
+  renderAlbumHashtagBar();
+  updateAlbumSearchActiveBadge();
 }
 
 async function jumpToAlbumFilter(filterObj) {
@@ -1474,6 +1583,10 @@ async function loadAlbumPosts(page = 1, append = false) {
       state.albumMonthCounts = res.data.monthCounts;
       renderAlbumYearMonthSelects();
     }
+    if (Array.isArray(res.data.allHashtags)) {
+      state.albumHashtags = res.data.allHashtags;
+      renderAlbumHashtagBar();
+    }
 
     state.albumPage = res.data.page || page;
     state.albumTotal = Number(res.data.total || 0);
@@ -1500,6 +1613,9 @@ async function loadAlbumPosts(page = 1, append = false) {
 }
 
 function updateAlbumFilterBar(showCount) {
+  updateAlbumSearchActiveBadge();
+  renderAlbumHashtagBar();
+
   const filterBar = document.getElementById('album-filter-bar');
   const labelEl = document.getElementById('album-filter-label');
   const parts = [];
@@ -1559,7 +1675,7 @@ function appendCaptionWithHashtags(container, text) {
 }
 
 /**
- * 點擊內文 #關鍵字：帶入搜尋輸入框並立即執行搜尋
+ * 點擊內文 #關鍵字：帶入搜尋輸入框、同步標籤列並立即執行搜尋
  */
 function applyHashtagToSearch(tagText) {
   const searchInput = document.getElementById('album-search-input');
@@ -1574,6 +1690,8 @@ function applyHashtagToSearch(tagText) {
     state.albumFilter = null;
   }
   state.albumKeyword = tagText;
+  renderAlbumHashtagBar();
+  updateAlbumSearchActiveBadge();
   loadAlbumPosts(1, false);
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
@@ -2105,7 +2223,7 @@ function buildEventShareFlex(ev) {
 }
 
 // ============================================================================
-// 相簿編輯彈窗與合併至另一篇相簿
+// 相簿編輯彈窗（快速加入已有 #標籤、合併至另一篇相簿、單檔刪除）
 // ============================================================================
 async function openAlbumEditById(postId) {
   let target = state.albumPosts.find((p) => p.post_id === postId);
@@ -2113,6 +2231,9 @@ async function openAlbumEditById(postId) {
     const res = await apiCall('getAlbumPosts', { postId, page: 1, pageSize: 1 });
     if (res.ok && res.data.posts && res.data.posts.length > 0) {
       target = res.data.posts[0];
+      if (Array.isArray(res.data.allHashtags)) {
+        state.albumHashtags = res.data.allHashtags;
+      }
     }
   }
   if (target) {
@@ -2129,9 +2250,113 @@ async function openAlbumEditModal(post) {
   document.getElementById('post-caption').value = post.caption || '';
 
   renderEditPostMediaGrid();
+  renderPostEditHashtagChips();
   openModal('modal-post');
 
+  // 若直接透過 LINE 連結進來編輯、尚未取得過相簿既有標籤清單，背景補撈一次
+  if (!state.albumLoadedOnce && state.albumHashtags.length === 0) {
+    apiCall('getAlbumPosts', { page: 1, pageSize: 1 }).then((res) => {
+      if (res && res.ok && Array.isArray(res.data.allHashtags)) {
+        state.albumHashtags = res.data.allHashtags;
+        renderPostEditHashtagChips();
+      }
+    }).catch(() => {});
+  }
+
   await loadNearbyEventsSelect(post.post_date, post.linked_event_id, post.linked_event);
+}
+
+function extractHashtagsFromText(text) {
+  const str = String(text || '');
+  const regex = /#([^\s#，。、！？,.;:：()（）\[\]【】]+)/g;
+  const set = new Set();
+  let match;
+  while ((match = regex.exec(str)) !== null) {
+    set.add(match[0]);
+  }
+  return set;
+}
+
+/**
+ * 渲染編輯相簿彈窗下方的既有 #標籤 快選鈕（已存在於內文者顯示勾選反白）
+ */
+function renderPostEditHashtagChips() {
+  const wrap = document.getElementById('post-edit-hashtags-wrap');
+  const container = document.getElementById('post-edit-hashtag-chips');
+  const captionEl = document.getElementById('post-caption');
+  if (!wrap || !container || !captionEl) return;
+
+  const currentTags = extractHashtagsFromText(captionEl.value);
+  const allTagsMap = new Map();
+  (state.albumHashtags || []).forEach((item) => {
+    allTagsMap.set(item.tag, item.count);
+  });
+  currentTags.forEach((t) => {
+    if (!allTagsMap.has(t)) allTagsMap.set(t, 0);
+  });
+
+  if (allTagsMap.size === 0) {
+    wrap.classList.add('hidden');
+    container.innerHTML = '';
+    return;
+  }
+
+  wrap.classList.remove('hidden');
+  container.innerHTML = '';
+
+  allTagsMap.forEach((_, tag) => {
+    const isAdded = currentTags.has(tag);
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'edit-hashtag-chip' + (isAdded ? ' active' : '');
+
+    const icon = document.createElement('i');
+    icon.className = isAdded ? 'fa-solid fa-check fa-2xs' : 'fa-solid fa-plus fa-2xs';
+    btn.appendChild(icon);
+
+    const label = document.createElement('span');
+    label.textContent = tag;
+    btn.appendChild(label);
+
+    btn.addEventListener('click', () => toggleHashtagInCaption(tag));
+    container.appendChild(btn);
+  });
+}
+
+function escapeRegExp(str) {
+  return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * 點選編輯彈窗內的快選標籤：尚未加入則補空格附加至說明文字；已加入則精準移除該標籤
+ */
+function toggleHashtagInCaption(tag) {
+  const captionEl = document.getElementById('post-caption');
+  if (!captionEl) return;
+
+  const currentVal = captionEl.value;
+  const currentTags = extractHashtagsFromText(currentVal);
+
+  if (currentTags.has(tag)) {
+    const boundary = '(?=$|[\\s#，。、！？,.;:：()（）\\[\\]【】])';
+    const removeRegex = new RegExp('[ \\t]*' + escapeRegExp(tag) + boundary, 'g');
+    captionEl.value = currentVal
+      .replace(removeRegex, '')
+      .replace(/[ \t]+\n/g, '\n')
+      .replace(/^\s+|\s+$/g, '');
+  } else {
+    const trimmedRight = currentVal.replace(/[ \t]+$/, '');
+    if (!trimmedRight) {
+      captionEl.value = tag;
+    } else if (trimmedRight.endsWith('\n')) {
+      captionEl.value = trimmedRight + tag;
+    } else {
+      captionEl.value = trimmedRight + ' ' + tag;
+    }
+  }
+
+  renderPostEditHashtagChips();
+  captionEl.focus();
 }
 
 async function loadNearbyEventsSelect(centerDate, currentLinkedId, currentLinkedObj) {
@@ -2674,6 +2899,17 @@ function bindEvents() {
   document.getElementById('form-event').addEventListener('submit', handleSaveEvent);
   document.getElementById('btn-delete-event').addEventListener('click', handleDeleteEvent);
 
+  // 生活相簿：開啟官方帳號捷徑與收合搜尋面板
+  const openOaBtn = document.getElementById('btn-open-oa');
+  if (openOaBtn) openOaBtn.addEventListener('click', openOfficialAccountChat);
+
+  const toggleSearchBtn = document.getElementById('btn-toggle-album-search');
+  if (toggleSearchBtn) {
+    toggleSearchBtn.addEventListener('click', () => {
+      setAlbumSearchExpanded(!state.albumSearchExpanded);
+    });
+  }
+
   // 相簿手動搜尋（點擊「搜尋」按鈕或按 Enter 才呼叫 GAS）
   const searchInput = document.getElementById('album-search-input');
   const clearSearchBtn = document.getElementById('btn-clear-search');
@@ -2746,6 +2982,8 @@ function bindEvents() {
   document.getElementById('btn-load-more').addEventListener('click', () => {
     loadAlbumPosts(state.albumPage + 1, true);
   });
+
+  // 編輯相簿：日期變更連動附近行程、內文打字即時同步快選標籤狀態
   document.getElementById('post-date').addEventListener('change', (e) => {
     if (e.target.value && state.editingPost) {
       loadNearbyEventsSelect(
@@ -2755,6 +2993,10 @@ function bindEvents() {
       );
     }
   });
+  const postCaptionInput = document.getElementById('post-caption');
+  if (postCaptionInput) {
+    postCaptionInput.addEventListener('input', renderPostEditHashtagChips);
+  }
   document.getElementById('form-post').addEventListener('submit', handleSavePost);
   document.getElementById('btn-delete-post').addEventListener('click', handleDeleteEntirePost);
 
