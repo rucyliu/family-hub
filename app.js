@@ -57,12 +57,12 @@ const state = {
   albumTotal: 0,
   albumReqSeq: 0,
 
-  // 彈窗與燈箱暫存
+  // 彈窗暫存
   editingEvent: null,
   editingPost: null,
-  mergeContext: null,        // { sourcePostId, mediaId }
-  lightboxOriginalUrl: '',
+  mergeContext: null,
   confirmResolver: null,
+  confirmOnOk: null,
 };
 
 // ============================================================================
@@ -283,6 +283,23 @@ function showScreen(name, message) {
   if (name === 'error' && message) {
     document.getElementById('error-desc').textContent = message;
   }
+
+  if (name === 'app') {
+    requestAnimationFrame(syncStickyOffsets);
+  }
+}
+
+function syncStickyOffsets() {
+  const header = document.querySelector('.app-header');
+  const toolbar = document.querySelector('.cal-toolbar');
+  const headerH = header ? Math.ceil(header.getBoundingClientRect().height) : 57;
+  const toolbarH =
+    toolbar && state.currentTab === 'calendar'
+      ? Math.ceil(toolbar.getBoundingClientRect().height)
+      : 0;
+
+  document.documentElement.style.setProperty('--header-height', `${headerH}px`);
+  document.documentElement.style.setProperty('--cal-sticky-offset', `${headerH + toolbarH}px`);
 }
 
 function renderHeaderProfile() {
@@ -327,6 +344,8 @@ async function switchTab(tab, options = {}) {
       await loadAlbumPosts(1, false);
     }
   }
+
+  syncStickyOffsets();
 }
 
 function getCalendarViewStorageKey() {
@@ -380,6 +399,7 @@ function setCalendarViewMode(mode, options = {}) {
   if (fabToday) fabToday.classList.toggle('hidden', isMonth);
 
   if (render) {
+    syncStickyOffsets();
     renderCalendarCurrentView();
     if (!isMonth && isViewingCurrentMonth()) {
       scrollTimelineToDate(toDateStr(new Date()), 'smooth', false);
@@ -590,7 +610,58 @@ function renderCalendarGrid() {
 }
 
 /**
- * 時間軸視圖：直接依日期完整展開整月行程與當日生活相簿
+ * 將跨日行程依當月範圍逐日展開（例如 11/20~11/23 會在 20、21、22、23 每一天都出現）
+ */
+function expandEventsAcrossMonthDays(events, year, month) {
+  const groups = new Map();
+  const mm = String(month).padStart(2, '0');
+  const lastDay = new Date(year, month, 0).getDate();
+  const monthStart = `${year}-${mm}-01`;
+  const monthEnd = `${year}-${mm}-${String(lastDay).padStart(2, '0')}`;
+
+  events.forEach((ev) => {
+    if (!ev.start_date) return;
+    const rawEnd = ev.end_date && ev.end_date >= ev.start_date ? ev.end_date : ev.start_date;
+
+    const startParts = ev.start_date.split('-').map(Number);
+    const endParts = rawEnd.split('-').map(Number);
+    const startDt = new Date(startParts[0], startParts[1] - 1, startParts[2]);
+    const endDt = new Date(endParts[0], endParts[1] - 1, endParts[2]);
+    const totalDays = Math.round((endDt - startDt) / 86400000) + 1;
+
+    const loopStartStr = ev.start_date > monthStart ? ev.start_date : monthStart;
+    const loopEndStr = rawEnd < monthEnd ? rawEnd : monthEnd;
+    if (loopStartStr > loopEndStr) return;
+
+    const curParts = loopStartStr.split('-').map(Number);
+    const curDt = new Date(curParts[0], curParts[1] - 1, curParts[2]);
+
+    while (true) {
+      const curStr = toDateStr(curDt);
+      if (curStr > loopEndStr) break;
+
+      const dayIndex = Math.round((curDt - startDt) / 86400000) + 1;
+      if (!groups.has(curStr)) groups.set(curStr, []);
+      groups.get(curStr).push({
+        event: ev,
+        dayIndex,
+        totalDays,
+      });
+
+      curDt.setDate(curDt.getDate() + 1);
+    }
+  });
+
+  // 同一天內依時間排序（全天優先，再依開始時間）
+  groups.forEach((items) => {
+    items.sort((a, b) => (a.event.start_time || '').localeCompare(b.event.start_time || ''));
+  });
+
+  return groups;
+}
+
+/**
+ * 時間軸視圖：完整顯示當月所有日期（含連續天數行程的每一天與當日生活相簿）
  */
 function renderCalendarTimeline() {
   const listEl = document.getElementById('cal-timeline-list');
@@ -633,12 +704,11 @@ function renderCalendarTimeline() {
   const todayStr = toDateStr(new Date());
   const isCurrentMonth = isViewingCurrentMonth();
 
-  const groups = groupEventsByStartDate(filteredEvents);
+  const groups = expandEventsAcrossMonthDays(filteredEvents, state.viewYear, state.viewMonth);
   photoOnlyDates.forEach((d) => {
     if (!groups.has(d)) groups.set(d, []);
   });
 
-  // 檢視當月且「今天」沒有任何行程或相簿時，插入今日標記線確保定位精準
   const needTodayMarker = isCurrentMonth && !groups.has(todayStr);
   const allDates = Array.from(groups.keys());
   if (needTodayMarker) allDates.push(todayStr);
@@ -661,17 +731,7 @@ function renderCalendarTimeline() {
   });
 }
 
-function groupEventsByStartDate(events) {
-  const groups = new Map();
-  events.forEach((ev) => {
-    const key = ev.start_date;
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(ev);
-  });
-  return groups;
-}
-
-function buildTimelineDayGroupElement(dateStr, events, todayStr) {
+function buildTimelineDayGroupElement(dateStr, dayItems, todayStr) {
   const groupEl = document.createElement('div');
   groupEl.className = 'timeline-day-group';
   groupEl.dataset.date = dateStr;
@@ -689,23 +749,16 @@ function buildTimelineDayGroupElement(dateStr, events, todayStr) {
   wk.textContent = getWeekdayShort(dateStr);
   dateCol.appendChild(wk);
 
-  // 僅針對「開始日早於今天，且結束日仍大於等於今天」的跨日行程標示進行中
-  const hasOngoingEvent = dateStr < todayStr && events.some((ev) => {
-    const endDate = ev.end_date || ev.start_date;
-    return endDate >= todayStr;
-  });
-  if (hasOngoingEvent) {
-    const ongoing = document.createElement('div');
-    ongoing.className = 'timeline-ongoing-badge';
-    ongoing.textContent = '進行中';
-    dateCol.appendChild(ongoing);
-  }
-
   const eventsCol = document.createElement('div');
   eventsCol.className = 'timeline-events-col';
 
-  events.forEach((ev) => {
-    eventsCol.appendChild(buildEventCardElement(ev));
+  dayItems.forEach((item) => {
+    eventsCol.appendChild(
+      buildEventCardElement(item.event, {
+        dayIndex: item.dayIndex,
+        totalDays: item.totalDays,
+      })
+    );
   });
 
   // 當日生活相簿縮圖條
@@ -818,7 +871,7 @@ function getEventsForDate(dateStr) {
   });
 }
 
-function buildEventCardElement(ev) {
+function buildEventCardElement(ev, timelineMeta = null) {
   const tags = parseTags(ev.tags !== undefined ? ev.tags : ev.tag);
   const primaryColor = getEventPrimaryColor(ev);
   const card = document.createElement('div');
@@ -841,44 +894,39 @@ function buildEventCardElement(ev) {
 
   const timeBadge = document.createElement('span');
   timeBadge.className = 'time-badge';
-  const rangeText = ev.end_date && ev.end_date !== ev.start_date
+  let rangeText = ev.end_date && ev.end_date !== ev.start_date
     ? `${ev.start_date.slice(5)} 至 ${ev.end_date.slice(5)}`
     : (ev.start_time ? ev.start_time : '全天');
+  if (timelineMeta && timelineMeta.totalDays > 1) {
+    rangeText += `（第 ${timelineMeta.dayIndex}/${timelineMeta.totalDays} 天）`;
+  }
   timeBadge.textContent = rangeText;
   badges.appendChild(timeBadge);
 
   const actions = document.createElement('div');
   actions.className = 'event-card-actions';
 
-  // 一鍵複製為新行程
   const copyBtn = document.createElement('button');
   copyBtn.type = 'button';
-  copyBtn.className = 'event-copy-btn';
+  copyBtn.className = 'event-action-btn event-copy-btn';
   copyBtn.title = '複製成新行程';
-  copyBtn.setAttribute('aria-label', '複製成新行程');
-  copyBtn.innerHTML = '<i class="fa-regular fa-copy"></i>';
+  copyBtn.innerHTML = '<i class="fa-regular fa-copy"></i><span>複製</span>';
   copyBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     openEventModal(ev, { isCopy: true });
   });
   actions.appendChild(copyBtn);
 
-  // 分享單筆行程卡片到 LINE
   const shareBtn = document.createElement('button');
   shareBtn.type = 'button';
-  shareBtn.className = 'event-share-btn';
+  shareBtn.className = 'event-action-btn event-share-btn';
   shareBtn.title = '分享行程卡片到 LINE';
-  shareBtn.setAttribute('aria-label', '分享行程卡片到 LINE');
-  shareBtn.innerHTML = '<i class="fa-regular fa-paper-plane"></i>';
+  shareBtn.innerHTML = '<i class="fa-regular fa-paper-plane"></i><span>分享</span>';
   shareBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     handleShareEvent(ev);
   });
   actions.appendChild(shareBtn);
-
-  const editIcon = document.createElement('i');
-  editIcon.className = 'fa-regular fa-pen-to-square muted';
-  actions.appendChild(editIcon);
 
   top.appendChild(badges);
   top.appendChild(actions);
@@ -1566,22 +1614,19 @@ function renderAlbumList() {
     const actionsWrap = document.createElement('div');
     actionsWrap.className = 'post-header-actions';
 
-    // 固定顯示 LINE 分享按鈕（liff.shareTargetPicker）
     const shareBtn = document.createElement('button');
     shareBtn.type = 'button';
-    shareBtn.className = 'icon-btn share-btn';
+    shareBtn.className = 'post-action-btn share-btn';
     shareBtn.title = '分享相簿卡片到 LINE 群組或好友';
-    shareBtn.setAttribute('aria-label', '分享相簿卡片到 LINE');
-    shareBtn.innerHTML = '<i class="fa-regular fa-paper-plane"></i>';
+    shareBtn.innerHTML = '<i class="fa-regular fa-paper-plane"></i><span>分享</span>';
     shareBtn.addEventListener('click', () => handleSharePost(post));
     actionsWrap.appendChild(shareBtn);
 
     const editBtn = document.createElement('button');
     editBtn.type = 'button';
-    editBtn.className = 'icon-btn';
+    editBtn.className = 'post-action-btn';
     editBtn.title = '編輯貼文、合併相簿與關聯行程';
-    editBtn.setAttribute('aria-label', '編輯相簿貼文');
-    editBtn.innerHTML = '<i class="fa-regular fa-pen-to-square"></i>';
+    editBtn.innerHTML = '<i class="fa-regular fa-pen-to-square"></i><span>編輯</span>';
     editBtn.addEventListener('click', () => openAlbumEditModal(post));
     actionsWrap.appendChild(editBtn);
 
@@ -1660,11 +1705,13 @@ function renderAlbumList() {
   loadMoreWrap.classList.toggle('hidden', !state.albumHasMore);
 }
 
+/**
+ * 網站內僅載入一次小縮圖（w400）；照片與影片統一改為點擊先跳流量確認，確定才開 Google 雲端原檔
+ */
 function appendMediaThumbElement(container, media, dateLabel) {
   const isVideo = media.media_type === 'video';
   const thumbId = isVideo ? (media.thumb_file_id || media.drive_file_id) : media.drive_file_id;
   const thumbUrl = getDriveThumbUrl(thumbId, 400);
-  const originalUrl = getDriveViewUrl(media.drive_file_id);
 
   const img = document.createElement('img');
   img.src = thumbUrl;
@@ -1687,10 +1734,26 @@ function appendMediaThumbElement(container, media, dateLabel) {
     overlay.className = 'video-overlay';
     overlay.innerHTML = '<div class="video-play-circle"><i class="fa-solid fa-play"></i></div><span class="video-tag">影片</span>';
     container.appendChild(overlay);
-    container.addEventListener('click', () => openExternalUrl(originalUrl));
-  } else {
-    container.addEventListener('click', () => openLightbox(media.drive_file_id, dateLabel));
   }
+
+  container.addEventListener('click', () => {
+    confirmAndOpenOriginalMedia(media, dateLabel);
+  });
+}
+
+function confirmAndOpenOriginalMedia(media, dateLabel) {
+  const isVideo = media.media_type === 'video';
+  const originalUrl = getDriveViewUrl(media.drive_file_id);
+  const mediaLabel = isVideo ? '原始影片' : '原始高解析度照片';
+  const datePrefix = dateLabel ? `（${dateLabel}）` : '';
+
+  showConfirm(
+    `開啟${mediaLabel}`,
+    `即將前往 Google 雲端硬碟開啟${mediaLabel}${datePrefix}。\n\n提醒：載入原檔可能會消耗較多行動網路流量，確定要開啟嗎？`,
+    '確定開啟',
+    false,
+    () => openExternalUrl(originalUrl)
+  );
 }
 
 // ============================================================================
@@ -2256,41 +2319,6 @@ async function handleDeleteEntirePost() {
 // ============================================================================
 // 大圖燈箱與外部原檔開啟
 // ============================================================================
-function openLightbox(driveFileId, dateLabel) {
-  state.lightboxOriginalUrl = getDriveViewUrl(driveFileId);
-  document.getElementById('lightbox-info').textContent = dateLabel ? `${dateLabel} 照片預覽` : '照片預覽';
-
-  const img = document.getElementById('lightbox-img');
-  const spinner = document.getElementById('lightbox-spinner');
-
-  img.onload = null;
-  img.onerror = null;
-  img.classList.add('hidden');
-  spinner.classList.remove('hidden');
-
-  const targetUrl = getDriveThumbUrl(driveFileId, 1200);
-  img.onload = () => {
-    spinner.classList.add('hidden');
-    img.classList.remove('hidden');
-  };
-  img.onerror = () => {
-    if (document.getElementById('modal-lightbox').classList.contains('hidden')) return;
-    spinner.classList.add('hidden');
-    showToast('預覽載入失敗，請直接點擊下方開啟原檔', 'error');
-  };
-  img.src = targetUrl;
-
-  document.getElementById('modal-lightbox').classList.remove('hidden');
-}
-
-function closeLightbox() {
-  const img = document.getElementById('lightbox-img');
-  img.onload = null;
-  img.onerror = null;
-  img.removeAttribute('src');
-  img.classList.add('hidden');
-  document.getElementById('modal-lightbox').classList.add('hidden');
-}
 
 function openExternalUrl(url) {
   if (typeof liff !== 'undefined' && liff.isInClient()) {
@@ -2344,9 +2372,10 @@ async function handleSaveProfile(e) {
   }
 }
 
-function showConfirm(title, message, okLabel = '確定刪除', isDanger = true) {
+function showConfirm(title, message, okLabel = '確定刪除', isDanger = true, onConfirm = null) {
   return new Promise((resolve) => {
     state.confirmResolver = resolve;
+    state.confirmOnOk = typeof onConfirm === 'function' ? onConfirm : null;
     document.getElementById('confirm-title').textContent = title;
     document.getElementById('confirm-message').textContent = message;
     const okBtn = document.getElementById('btn-confirm-ok');
@@ -2357,10 +2386,17 @@ function showConfirm(title, message, okLabel = '確定刪除', isDanger = true) 
 }
 
 function resolveConfirm(val) {
+  const onOk = state.confirmOnOk;
+  const resolver = state.confirmResolver;
+  state.confirmOnOk = null;
+  state.confirmResolver = null;
   closeModal('modal-confirm');
-  if (state.confirmResolver) {
-    state.confirmResolver(val);
-    state.confirmResolver = null;
+
+  if (val && onOk) {
+    onOk();
+  }
+  if (resolver) {
+    resolver(val);
   }
 }
 
@@ -2660,12 +2696,6 @@ function bindEvents() {
   });
   document.getElementById('form-profile').addEventListener('submit', handleSaveProfile);
 
-  // 燈箱
-  document.getElementById('btn-close-lightbox').addEventListener('click', closeLightbox);
-  document.getElementById('btn-open-original').addEventListener('click', () => {
-    if (state.lightboxOriginalUrl) openExternalUrl(state.lightboxOriginalUrl);
-  });
-
   // 確認框
   document.getElementById('btn-confirm-cancel').addEventListener('click', () => resolveConfirm(false));
   document.getElementById('btn-confirm-ok').addEventListener('click', () => resolveConfirm(true));
@@ -2688,12 +2718,12 @@ function bindEvents() {
     if (e.key !== 'Escape') return;
     if (!document.getElementById('modal-confirm').classList.contains('hidden')) {
       resolveConfirm(false);
-    } else if (!document.getElementById('modal-lightbox').classList.contains('hidden')) {
-      closeLightbox();
     } else if (!document.getElementById('modal-merge').classList.contains('hidden')) {
       closeModal('modal-merge');
     } else {
       ['modal-event', 'modal-post', 'modal-profile'].forEach(closeModal);
     }
   });
+
+  window.addEventListener('resize', syncStickyOffsets);
 }
