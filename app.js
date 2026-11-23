@@ -5,7 +5,7 @@
 const CONFIG = {
   LIFF_ID: '2012740107-BWMenJbV',
   GAS_API_URL: 'https://script.google.com/macros/s/AKfycbwuKl5ZZD5OlEM9oND5WEtFKOudhO8cTqJkegxjKfm0_uQ0J3kkGI8qIWtcGpePTk0rsg/exec',
-  PAGE_SIZE: 20,
+  PAGE_SIZE: 10, // 調降單頁載入筆數以減少初次載入縮圖與 API 流量
 };
 
 // 高對比自動標籤調色盤（同標籤透過確定性雜湊永遠固定對應同一色碼）
@@ -19,6 +19,7 @@ const TAG_COLOR_PALETTE = [
 const RELOGIN_COOLDOWN_KEY = 'family_hub_relogin_ts';
 const CALENDAR_VIEW_PREF_PREFIX = 'family_hub_cal_view_';
 const MOBILE_VIEW_BREAKPOINT = 768; // 螢幕寬度 <= 768px 初次開啟預設顯示時間軸
+const CALENDAR_CACHE_TTL_MS = 3 * 60 * 1000; // 行事曆月份快取有效時間（3 分鐘）
 
 // ============================================================================
 // 應用程式狀態
@@ -42,6 +43,7 @@ const state = {
   monthEvents: [],
   photoDates: new Set(),
   dayThumbnails: {},
+  monthCache: {},            // 以 "YYYY-M" 為鍵快取各月資料，避免切換分頁重打 API
 
   // 生活相簿狀態
   albumPosts: [],
@@ -60,7 +62,7 @@ const state = {
   // 彈窗暫存
   editingEvent: null,
   editingPost: null,
-  mergeContext: null,
+  mergeContext: null,        // { sourcePostId, mediaId }
   confirmResolver: null,
   confirmOnOk: null,
 };
@@ -115,7 +117,7 @@ async function verifyMemberAndBoot() {
       document.getElementById('pending-name').textContent = u.display_name || '新成員';
       const avatar = document.getElementById('pending-avatar');
       if (u.avatar_url) {
-        avatar.src = u.avatar_url;
+        setAvatarImage(avatar, u.avatar_url);
         avatar.classList.remove('hidden');
       }
       showScreen('pending');
@@ -269,7 +271,7 @@ async function apiCall(action, payload = {}) {
 }
 
 // ============================================================================
-// 介面切換與個人視圖偏好記憶
+// 介面切換、固定列高度同步與個人視圖偏好記憶
 // ============================================================================
 function showScreen(name, message) {
   document.getElementById('screen-loading').classList.toggle('hidden', name !== 'loading');
@@ -283,12 +285,14 @@ function showScreen(name, message) {
   if (name === 'error' && message) {
     document.getElementById('error-desc').textContent = message;
   }
-
   if (name === 'app') {
     requestAnimationFrame(syncStickyOffsets);
   }
 }
 
+/**
+ * 動態量測頂部列與固定行事曆工具列高度，避免手機換行時蓋住時間軸日期或捲動定位
+ */
 function syncStickyOffsets() {
   const header = document.querySelector('.app-header');
   const toolbar = document.querySelector('.cal-toolbar');
@@ -307,7 +311,7 @@ function renderHeaderProfile() {
   const img = document.getElementById('my-avatar');
   const fallback = document.getElementById('my-avatar-fallback');
   if (state.user.avatar_url) {
-    img.src = state.user.avatar_url;
+    setAvatarImage(img, state.user.avatar_url);
     img.classList.remove('hidden');
     fallback.classList.add('hidden');
   } else {
@@ -327,6 +331,8 @@ async function switchTab(tab, options = {}) {
 
   const headerIcon = document.getElementById('header-icon');
   const headerText = document.getElementById('header-text');
+  syncStickyOffsets();
+
   if (tab === 'calendar') {
     headerIcon.className = 'fa-regular fa-calendar-days';
     headerText.textContent = '家庭行事曆';
@@ -337,6 +343,7 @@ async function switchTab(tab, options = {}) {
       scrollToDate: options.scrollToDate || '',
       scrollBehavior: options.scrollBehavior || 'auto',
     });
+    requestAnimationFrame(syncStickyOffsets);
   } else {
     headerIcon.className = 'fa-regular fa-images';
     headerText.textContent = '生活相簿';
@@ -344,8 +351,6 @@ async function switchTab(tab, options = {}) {
       await loadAlbumPosts(1, false);
     }
   }
-
-  syncStickyOffsets();
 }
 
 function getCalendarViewStorageKey() {
@@ -417,12 +422,46 @@ function renderCalendarCurrentView() {
 }
 
 // ============================================================================
-// 分頁 1：行事曆（月曆視圖、精簡時間軸、今日自動定位、多標籤篩選）
+// 分頁 1：行事曆（月份快取、月曆視圖、逐日展開時間軸、今日自動定位）
 // ============================================================================
+function invalidateCalendarCache() {
+  state.monthCache = {};
+}
+
+function applyMonthDataAndRender(data, options = {}) {
+  state.monthEvents = (data.events || []).map((ev) => ({
+    ...ev,
+    tags: parseTags(ev.tags !== undefined ? ev.tags : ev.tag),
+  }));
+  state.existingTags = parseTags(data.allTags || []);
+  state.photoDates = new Set(data.photoDates || []);
+  state.dayThumbnails = data.dayThumbnails || {};
+
+  renderCalendarTagFilter();
+  renderCalendarCurrentView();
+
+  if (state.calendarViewMode === 'timeline') {
+    const behavior = options.scrollBehavior || 'smooth';
+    const highlight = Boolean(options.highlight);
+    if (options.scrollToDate) {
+      scrollTimelineToDate(options.scrollToDate, behavior, true);
+    } else if (options.scrollToToday && isViewingCurrentMonth()) {
+      scrollTimelineToDate(toDateStr(new Date()), behavior, highlight);
+    }
+  }
+}
+
 async function loadCalendarMonth(year, month, options = {}) {
   state.viewYear = year;
   state.viewMonth = month;
   document.getElementById('cal-month-label').textContent = `${year} 年 ${month} 月`;
+
+  const cacheKey = `${year}-${month}`;
+  const cached = !options.forceReload ? state.monthCache[cacheKey] : null;
+  if (cached && (Date.now() - cached.fetchedAt) < CALENDAR_CACHE_TTL_MS) {
+    applyMonthDataAndRender(cached.data, options);
+    return;
+  }
 
   try {
     const res = await apiCall('getMonthEvents', { year, month });
@@ -431,26 +470,11 @@ async function loadCalendarMonth(year, month, options = {}) {
       return;
     }
 
-    state.monthEvents = (res.data.events || []).map((ev) => ({
-      ...ev,
-      tags: parseTags(ev.tags !== undefined ? ev.tags : ev.tag),
-    }));
-    state.existingTags = parseTags(res.data.allTags || []);
-    state.photoDates = new Set(res.data.photoDates || []);
-    state.dayThumbnails = res.data.dayThumbnails || {};
-
-    renderCalendarTagFilter();
-    renderCalendarCurrentView();
-
-    if (state.calendarViewMode === 'timeline') {
-      const behavior = options.scrollBehavior || 'smooth';
-      const highlight = Boolean(options.highlight);
-      if (options.scrollToDate) {
-        scrollTimelineToDate(options.scrollToDate, behavior, true);
-      } else if (options.scrollToToday && isViewingCurrentMonth()) {
-        scrollTimelineToDate(toDateStr(new Date()), behavior, highlight);
-      }
-    }
+    state.monthCache[cacheKey] = {
+      fetchedAt: Date.now(),
+      data: res.data,
+    };
+    applyMonthDataAndRender(res.data, options);
   } catch (err) {
     showToast('無法連線取得行程資料', 'error');
   }
@@ -579,7 +603,6 @@ function renderCalendarGrid() {
     }
     cell.appendChild(topRow);
 
-    // 單日全部行程完整顯示
     const dayEvents = getEventsForDate(dateStr);
     if (dayEvents.length > 0) {
       const bars = document.createElement('div');
@@ -610,7 +633,7 @@ function renderCalendarGrid() {
 }
 
 /**
- * 將跨日行程依當月範圍逐日展開（例如 11/20~11/23 會在 20、21、22、23 每一天都出現）
+ * 將連續天數行程依當月範圍逐日展開（例如 11/20~11/23 會在每一天都顯示並標示第 X/Y 天）
  */
 function expandEventsAcrossMonthDays(events, year, month) {
   const groups = new Map();
@@ -652,7 +675,6 @@ function expandEventsAcrossMonthDays(events, year, month) {
     }
   });
 
-  // 同一天內依時間排序（全天優先，再依開始時間）
   groups.forEach((items) => {
     items.sort((a, b) => (a.event.start_time || '').localeCompare(b.event.start_time || ''));
   });
@@ -661,7 +683,7 @@ function expandEventsAcrossMonthDays(events, year, month) {
 }
 
 /**
- * 時間軸視圖：完整顯示當月所有日期（含連續天數行程的每一天與當日生活相簿）
+ * 時間軸視圖：完整展開整月所有日期（含連續天數行程的每一天與當日生活相簿）
  */
 function renderCalendarTimeline() {
   const listEl = document.getElementById('cal-timeline-list');
@@ -709,6 +731,7 @@ function renderCalendarTimeline() {
     if (!groups.has(d)) groups.set(d, []);
   });
 
+  // 檢視當月且「今天」無任何行程或相簿時，插入今日標記線方便自動與手動定位
   const needTodayMarker = isCurrentMonth && !groups.has(todayStr);
   const allDates = Array.from(groups.keys());
   if (needTodayMarker) allDates.push(todayStr);
@@ -761,7 +784,7 @@ function buildTimelineDayGroupElement(dateStr, dayItems, todayStr) {
     );
   });
 
-  // 當日生活相簿縮圖條
+  // 當日生活相簿縮圖條（顯示寬度 64px，改抓 w160 節省約 60% 流量）
   const thumbs = (state.dayThumbnails && state.dayThumbnails[dateStr]) || [];
   if (thumbs.length > 0) {
     const photosBox = document.createElement('div');
@@ -793,7 +816,7 @@ function buildTimelineDayGroupElement(dateStr, dayItems, todayStr) {
     thumbs.forEach((m) => {
       const item = document.createElement('div');
       item.className = 'strip-item';
-      appendMediaThumbElement(item, m, dateStr);
+      appendMediaThumbElement(item, m, dateStr, 160);
       strip.appendChild(item);
     });
     photosBox.appendChild(strip);
@@ -871,6 +894,9 @@ function getEventsForDate(dateStr) {
   });
 }
 
+/**
+ * 行程卡片（右上三顆文字按鈕由左到右：分享、複製、編輯；點卡片本體不再開啟編輯視窗）
+ */
 function buildEventCardElement(ev, timelineMeta = null) {
   const tags = parseTags(ev.tags !== undefined ? ev.tags : ev.tag);
   const primaryColor = getEventPrimaryColor(ev);
@@ -906,27 +932,29 @@ function buildEventCardElement(ev, timelineMeta = null) {
   const actions = document.createElement('div');
   actions.className = 'event-card-actions';
 
-  const copyBtn = document.createElement('button');
-  copyBtn.type = 'button';
-  copyBtn.className = 'event-action-btn event-copy-btn';
-  copyBtn.title = '複製成新行程';
-  copyBtn.innerHTML = '<i class="fa-regular fa-copy"></i><span>複製</span>';
-  copyBtn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    openEventModal(ev, { isCopy: true });
-  });
-  actions.appendChild(copyBtn);
-
   const shareBtn = document.createElement('button');
   shareBtn.type = 'button';
   shareBtn.className = 'event-action-btn event-share-btn';
   shareBtn.title = '分享行程卡片到 LINE';
   shareBtn.innerHTML = '<i class="fa-regular fa-paper-plane"></i><span>分享</span>';
-  shareBtn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    handleShareEvent(ev);
-  });
+  shareBtn.addEventListener('click', () => handleShareEvent(ev));
   actions.appendChild(shareBtn);
+
+  const copyBtn = document.createElement('button');
+  copyBtn.type = 'button';
+  copyBtn.className = 'event-action-btn event-copy-btn';
+  copyBtn.title = '複製成新行程';
+  copyBtn.innerHTML = '<i class="fa-regular fa-copy"></i><span>複製</span>';
+  copyBtn.addEventListener('click', () => openEventModal(ev, { isCopy: true }));
+  actions.appendChild(copyBtn);
+
+  const editBtn = document.createElement('button');
+  editBtn.type = 'button';
+  editBtn.className = 'event-action-btn event-edit-btn';
+  editBtn.title = '編輯行程';
+  editBtn.innerHTML = '<i class="fa-regular fa-pen-to-square"></i><span>編輯</span>';
+  editBtn.addEventListener('click', () => openEventModal(ev));
+  actions.appendChild(editBtn);
 
   top.appendChild(badges);
   top.appendChild(actions);
@@ -952,8 +980,7 @@ function buildEventCardElement(ev, timelineMeta = null) {
     const span = document.createElement('span');
     span.textContent = `關聯相簿（${ev.linked_media_count} 則媒體）`;
     pill.appendChild(span);
-    pill.addEventListener('click', (e) => {
-      e.stopPropagation();
+    pill.addEventListener('click', () => {
       jumpToAlbumFilter({
         type: 'event',
         value: ev.event_id,
@@ -963,7 +990,6 @@ function buildEventCardElement(ev, timelineMeta = null) {
     card.appendChild(pill);
   }
 
-  card.addEventListener('click', () => openEventModal(ev));
   return card;
 }
 
@@ -1014,7 +1040,7 @@ function renderSelectedDayPanel() {
     thumbs.forEach((m) => {
       const item = document.createElement('div');
       item.className = 'strip-item';
-      appendMediaThumbElement(item, m, dateStr);
+      appendMediaThumbElement(item, m, dateStr, 160);
       strip.appendChild(item);
     });
   }
@@ -1243,11 +1269,13 @@ async function handleSaveEvent(e) {
     closeModal('modal-event');
     showToast(payload.event_id ? '行程已更新' : '已新增行程', 'success');
 
+    invalidateCalendarCache();
     state.selectedDate = payload.start_date;
     const [y, m] = payload.start_date.split('-').map(Number);
     await loadCalendarMonth(y, m, {
       scrollToDate: payload.start_date,
       scrollBehavior: 'smooth',
+      forceReload: true,
     });
   } catch (err) {
     showToast('儲存過程發生網路錯誤', 'error');
@@ -1273,7 +1301,8 @@ async function handleDeleteEvent() {
     }
     closeModal('modal-event');
     showToast('行程已刪除', 'success');
-    await loadCalendarMonth(state.viewYear, state.viewMonth);
+    invalidateCalendarCache();
+    await loadCalendarMonth(state.viewYear, state.viewMonth, { forceReload: true });
   } catch (err) {
     showToast('刪除失敗，請稍後再試', 'error');
   } finally {
@@ -1282,7 +1311,7 @@ async function handleDeleteEvent() {
 }
 
 // ============================================================================
-// 分頁 2：生活相簿（手動搜尋、#關鍵字點擊、年月跳轉、成員篩選、最後編輯者）
+// 分頁 2：生活相簿（手動搜尋、#關鍵字點擊、年月跳轉、最後編輯者、省流量縮圖）
 // ============================================================================
 function renderAlbumMemberFilter() {
   const bar = document.getElementById('album-member-filter');
@@ -1311,7 +1340,7 @@ function renderAlbumMemberFilter() {
     if (u.avatar_url) {
       const img = document.createElement('img');
       img.className = 'member-chip-avatar';
-      img.src = u.avatar_url;
+      setAvatarImage(img, u.avatar_url);
       img.alt = u.display_name || '成員';
       btn.appendChild(img);
     } else {
@@ -1591,7 +1620,7 @@ function renderAlbumList() {
     if (post.author && post.author.avatar_url) {
       const av = document.createElement('img');
       av.className = 'avatar-sm';
-      av.src = post.author.avatar_url;
+      setAvatarImage(av, post.author.avatar_url);
       av.alt = post.author.display_name || '成員';
       authorWrap.appendChild(av);
     } else {
@@ -1671,10 +1700,12 @@ function renderAlbumList() {
       const cls = media.length === 1 ? 'count-1' : (media.length === 2 || media.length === 4 ? 'count-2' : 'count-many');
       grid.className = `media-grid ${cls}`;
 
+      // 單圖載入 w400，多圖網格載入 w240 以節省行動網路流量
+      const thumbWidth = media.length === 1 ? 400 : 240;
       media.forEach((m) => {
         const tile = document.createElement('div');
         tile.className = 'media-tile';
-        appendMediaThumbElement(tile, m, post.post_date);
+        appendMediaThumbElement(tile, m, post.post_date, thumbWidth);
         grid.appendChild(tile);
       });
       card.appendChild(grid);
@@ -1706,12 +1737,13 @@ function renderAlbumList() {
 }
 
 /**
- * 網站內僅載入一次小縮圖（w400）；照片與影片統一改為點擊先跳流量確認，確定才開 Google 雲端原檔
+ * 網站內僅載入一次縮圖（依區塊使用 w160 / w240 / w400）
+ * 照片與影片統一改為點擊先跳流量確認視窗，確認後才開啟 Google 雲端硬碟原檔
  */
-function appendMediaThumbElement(container, media, dateLabel) {
+function appendMediaThumbElement(container, media, dateLabel, thumbWidth = 400) {
   const isVideo = media.media_type === 'video';
   const thumbId = isVideo ? (media.thumb_file_id || media.drive_file_id) : media.drive_file_id;
-  const thumbUrl = getDriveThumbUrl(thumbId, 400);
+  const thumbUrl = getDriveThumbUrl(thumbId, thumbWidth);
 
   const img = document.createElement('img');
   img.src = thumbUrl;
@@ -2133,7 +2165,8 @@ function renderEditPostMediaGrid() {
 
     const img = document.createElement('img');
     const thumbId = m.media_type === 'video' ? (m.thumb_file_id || m.drive_file_id) : m.drive_file_id;
-    img.src = getDriveThumbUrl(thumbId, 400);
+    img.src = getDriveThumbUrl(thumbId, 240);
+    img.loading = 'lazy';
     img.alt = '縮圖';
     box.appendChild(img);
 
@@ -2232,6 +2265,7 @@ async function handleConfirmMerge(e) {
     }
 
     showToast(`已成功合併 ${res.data.moved_count} 則照片／影片`, 'success');
+    invalidateCalendarCache();
     await loadAlbumPosts(1, false);
   } catch (err) {
     showToast('合併過程發生網路錯誤', 'error');
@@ -2259,6 +2293,7 @@ async function handleSavePost(e) {
     }
     closeModal('modal-post');
     showToast('相簿已更新', 'success');
+    invalidateCalendarCache();
     await loadAlbumPosts(1, false);
   } catch (err) {
     showToast('更新失敗，請稍後再試', 'error');
@@ -2285,6 +2320,7 @@ async function handleDeleteSingleMedia(mediaId) {
       state.editingPost.media = state.editingPost.media.filter((m) => m.media_id !== mediaId);
       renderEditPostMediaGrid();
     }
+    invalidateCalendarCache();
     await loadAlbumPosts(1, false);
   } catch (err) {
     showToast('刪除失敗，請稍後再試', 'error');
@@ -2308,6 +2344,7 @@ async function handleDeleteEntirePost() {
     }
     closeModal('modal-post');
     showToast('已刪除整篇貼文', 'success');
+    invalidateCalendarCache();
     await loadAlbumPosts(1, false);
   } catch (err) {
     showToast('刪除失敗，請稍後再試', 'error');
@@ -2317,9 +2354,8 @@ async function handleDeleteEntirePost() {
 }
 
 // ============================================================================
-// 大圖燈箱與外部原檔開啟
+// 外部原檔開啟、暱稱、自訂確認框、Toast 與共用工具
 // ============================================================================
-
 function openExternalUrl(url) {
   if (typeof liff !== 'undefined' && liff.isInClient()) {
     liff.openWindow({ url, external: true });
@@ -2328,9 +2364,6 @@ function openExternalUrl(url) {
   }
 }
 
-// ============================================================================
-// 暱稱、自訂確認框、Toast 與共用工具（採安全字串拼接網址）
-// ============================================================================
 async function handleSaveProfile(e) {
   e.preventDefault();
   const name = document.getElementById('profile-name-input').value.trim();
@@ -2392,6 +2425,7 @@ function resolveConfirm(val) {
   state.confirmResolver = null;
   closeModal('modal-confirm');
 
+  // 同步執行開窗動作，避免瀏覽器視為非使用者互動而攔截彈出視窗
   if (val && onOk) {
     onOk();
   }
@@ -2473,6 +2507,35 @@ function getEventDisplayLabel(ev) {
   return '（未命名行程）';
 }
 
+/**
+ * 針對 LINE 官方頭像網址附加 /small 以大幅減少頭像流量，載入失敗自動退回原網址
+ */
+function getSmallAvatarUrl(url) {
+  const raw = String(url || '').trim();
+  if (!raw) return '';
+  if (/^https:\/\/s?profile\.line-scdn\.net\/[^?#]+$/i.test(raw)) {
+    const clean = raw.replace(/\/+$/, '');
+    if (!/\/(small|large)$/i.test(clean)) {
+      return clean + '/small';
+    }
+  }
+  return raw;
+}
+
+function setAvatarImage(imgEl, rawUrl) {
+  const raw = String(rawUrl || '').trim();
+  if (!imgEl || !raw) return;
+  const smallUrl = getSmallAvatarUrl(raw);
+  imgEl.loading = 'lazy';
+  imgEl.onerror = () => {
+    if (imgEl.src !== raw) {
+      imgEl.onerror = null;
+      imgEl.src = raw;
+    }
+  };
+  imgEl.src = smallUrl;
+}
+
 function getDriveThumbUrl(fileId, width) {
   return 'https://drive.google.com/thumbnail?id=' + encodeURIComponent(fileId) + '&sz=w' + width;
 }
@@ -2518,6 +2581,8 @@ function bindEvents() {
   document.getElementById('btn-reload-app').addEventListener('click', () => window.location.reload());
   const reloginBtn = document.getElementById('btn-relogin-app');
   if (reloginBtn) reloginBtn.addEventListener('click', () => triggerRelogin(true));
+
+  window.addEventListener('resize', syncStickyOffsets);
 
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible' && state.user && isIdTokenExpired(state.idToken)) {
@@ -2724,6 +2789,4 @@ function bindEvents() {
       ['modal-event', 'modal-post', 'modal-profile'].forEach(closeModal);
     }
   });
-
-  window.addEventListener('resize', syncStickyOffsets);
 }
