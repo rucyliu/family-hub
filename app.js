@@ -5,7 +5,9 @@
 const CONFIG = {
   LIFF_ID: '2012740107-BWMenJbV',
   GAS_API_URL: 'https://script.google.com/macros/s/AKfycbwuKl5ZZD5OlEM9oND5WEtFKOudhO8cTqJkegxjKfm0_uQ0J3kkGI8qIWtcGpePTk0rsg/exec',
-  PAGE_SIZE: 10, // 調降單頁載入筆數以減少初次載入縮圖與 API 流量
+  PAGE_SIZE: 10,         // 單頁載入篇數（減少初次進入相簿的縮圖與 API 流量）
+  THUMB_WIDTH: 240,      // 照片縮圖全站統一寬度（行事曆、相簿、編輯彈窗共用快取）
+  VIDEO_THUMB_WIDTH: 400 // 影片縮圖全站統一寬度（優先取 Drive 高清影片截圖並共用快取）
 };
 
 // 高對比自動標籤調色盤（同標籤透過確定性雜湊永遠固定對應同一色碼）
@@ -784,7 +786,7 @@ function buildTimelineDayGroupElement(dateStr, dayItems, todayStr) {
     );
   });
 
-  // 當日生活相簿縮圖條（顯示寬度 64px，改抓 w160 節省約 60% 流量）
+  // 當日生活相簿縮圖條（與生活相簿共用同一縮圖尺寸與瀏覽器快取）
   const thumbs = (state.dayThumbnails && state.dayThumbnails[dateStr]) || [];
   if (thumbs.length > 0) {
     const photosBox = document.createElement('div');
@@ -816,7 +818,7 @@ function buildTimelineDayGroupElement(dateStr, dayItems, todayStr) {
     thumbs.forEach((m) => {
       const item = document.createElement('div');
       item.className = 'strip-item';
-      appendMediaThumbElement(item, m, dateStr, 160);
+      appendMediaThumbElement(item, m, dateStr);
       strip.appendChild(item);
     });
     photosBox.appendChild(strip);
@@ -895,7 +897,7 @@ function getEventsForDate(dateStr) {
 }
 
 /**
- * 行程卡片（右上三顆文字按鈕由左到右：分享、複製、編輯；點卡片本體不再開啟編輯視窗）
+ * 行程卡片：右上僅顯示純圖示分享按鈕，點擊卡片本體開啟編輯視窗（內含複製／分享／刪除）
  */
 function buildEventCardElement(ev, timelineMeta = null) {
   const tags = parseTags(ev.tags !== undefined ? ev.tags : ev.tag);
@@ -934,27 +936,15 @@ function buildEventCardElement(ev, timelineMeta = null) {
 
   const shareBtn = document.createElement('button');
   shareBtn.type = 'button';
-  shareBtn.className = 'event-action-btn event-share-btn';
+  shareBtn.className = 'event-share-btn';
   shareBtn.title = '分享行程卡片到 LINE';
-  shareBtn.innerHTML = '<i class="fa-regular fa-paper-plane"></i><span>分享</span>';
-  shareBtn.addEventListener('click', () => handleShareEvent(ev));
+  shareBtn.setAttribute('aria-label', '分享行程卡片到 LINE');
+  shareBtn.innerHTML = '<i class="fa-regular fa-paper-plane"></i>';
+  shareBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    handleShareEvent(ev);
+  });
   actions.appendChild(shareBtn);
-
-  const copyBtn = document.createElement('button');
-  copyBtn.type = 'button';
-  copyBtn.className = 'event-action-btn event-copy-btn';
-  copyBtn.title = '複製成新行程';
-  copyBtn.innerHTML = '<i class="fa-regular fa-copy"></i><span>複製</span>';
-  copyBtn.addEventListener('click', () => openEventModal(ev, { isCopy: true }));
-  actions.appendChild(copyBtn);
-
-  const editBtn = document.createElement('button');
-  editBtn.type = 'button';
-  editBtn.className = 'event-action-btn event-edit-btn';
-  editBtn.title = '編輯行程';
-  editBtn.innerHTML = '<i class="fa-regular fa-pen-to-square"></i><span>編輯</span>';
-  editBtn.addEventListener('click', () => openEventModal(ev));
-  actions.appendChild(editBtn);
 
   top.appendChild(badges);
   top.appendChild(actions);
@@ -980,7 +970,8 @@ function buildEventCardElement(ev, timelineMeta = null) {
     const span = document.createElement('span');
     span.textContent = `關聯相簿（${ev.linked_media_count} 則媒體）`;
     pill.appendChild(span);
-    pill.addEventListener('click', () => {
+    pill.addEventListener('click', (e) => {
+      e.stopPropagation();
       jumpToAlbumFilter({
         type: 'event',
         value: ev.event_id,
@@ -990,6 +981,7 @@ function buildEventCardElement(ev, timelineMeta = null) {
     card.appendChild(pill);
   }
 
+  card.addEventListener('click', () => openEventModal(ev));
   return card;
 }
 
@@ -1040,7 +1032,7 @@ function renderSelectedDayPanel() {
     thumbs.forEach((m) => {
       const item = document.createElement('div');
       item.className = 'strip-item';
-      appendMediaThumbElement(item, m, dateStr, 160);
+      appendMediaThumbElement(item, m, dateStr);
       strip.appendChild(item);
     });
   }
@@ -1311,7 +1303,7 @@ async function handleDeleteEvent() {
 }
 
 // ============================================================================
-// 分頁 2：生活相簿（手動搜尋、#關鍵字點擊、年月跳轉、最後編輯者、省流量縮圖）
+// 分頁 2：生活相簿（手動搜尋、#關鍵字點擊、年月跳轉、最後編輯者、統一快取縮圖）
 // ============================================================================
 function renderAlbumMemberFilter() {
   const bar = document.getElementById('album-member-filter');
@@ -1700,12 +1692,10 @@ function renderAlbumList() {
       const cls = media.length === 1 ? 'count-1' : (media.length === 2 || media.length === 4 ? 'count-2' : 'count-many');
       grid.className = `media-grid ${cls}`;
 
-      // 單圖載入 w400，多圖網格載入 w240 以節省行動網路流量
-      const thumbWidth = media.length === 1 ? 400 : 240;
       media.forEach((m) => {
         const tile = document.createElement('div');
         tile.className = 'media-tile';
-        appendMediaThumbElement(tile, m, post.post_date, thumbWidth);
+        appendMediaThumbElement(tile, m, post.post_date);
         grid.appendChild(tile);
       });
       card.appendChild(grid);
@@ -1737,20 +1727,46 @@ function renderAlbumList() {
 }
 
 /**
- * 網站內僅載入一次縮圖（依區塊使用 w160 / w240 / w400）
- * 照片與影片統一改為點擊先跳流量確認視窗，確認後才開啟 Google 雲端硬碟原檔
+ * 統一設定媒體縮圖（照片用 w240、影片優先抓 Drive 高畫質原檔截圖 w400 並附退回機制）
+ * 行事曆、生活相簿與編輯彈窗全部共用相同網址，最大化瀏覽器快取命中率
  */
-function appendMediaThumbElement(container, media, dateLabel, thumbWidth = 400) {
+function setMediaThumbImage(imgEl, media, onAllFailed) {
   const isVideo = media.media_type === 'video';
-  const thumbId = isVideo ? (media.thumb_file_id || media.drive_file_id) : media.drive_file_id;
-  const thumbUrl = getDriveThumbUrl(thumbId, thumbWidth);
+  const width = isVideo ? CONFIG.VIDEO_THUMB_WIDTH : CONFIG.THUMB_WIDTH;
+  const primaryId = media.drive_file_id;
+  const fallbackId = isVideo && media.thumb_file_id && media.thumb_file_id !== primaryId
+    ? media.thumb_file_id
+    : '';
 
+  const primaryUrl = getDriveThumbUrl(primaryId, width);
+  const fallbackUrl = fallbackId ? getDriveThumbUrl(fallbackId, width) : '';
+
+  imgEl.loading = 'lazy';
+  imgEl.alt = isVideo ? '影片縮圖' : '生活照片縮圖';
+
+  let triedFallback = false;
+  imgEl.onerror = () => {
+    if (!triedFallback && fallbackUrl) {
+      triedFallback = true;
+      imgEl.src = fallbackUrl;
+      return;
+    }
+    imgEl.onerror = null;
+    if (typeof onAllFailed === 'function') {
+      onAllFailed();
+    }
+  };
+  imgEl.src = primaryUrl;
+}
+
+/**
+ * 網站內僅載入一次縮圖；照片與影片統一改為點擊先跳流量確認視窗，確認後才開啟 Google 雲端原檔
+ */
+function appendMediaThumbElement(container, media, dateLabel) {
+  const isVideo = media.media_type === 'video';
   const img = document.createElement('img');
-  img.src = thumbUrl;
-  img.loading = 'lazy';
-  img.alt = isVideo ? '影片縮圖' : '生活照片縮圖';
 
-  img.onerror = () => {
+  setMediaThumbImage(img, media, () => {
     img.remove();
     const fallback = document.createElement('div');
     fallback.className = 'video-fallback-bg';
@@ -1758,7 +1774,7 @@ function appendMediaThumbElement(container, media, dateLabel, thumbWidth = 400) 
       ? '<i class="fa-solid fa-film fa-lg"></i>'
       : '<i class="fa-regular fa-image fa-lg"></i>';
     container.prepend(fallback);
-  };
+  });
   container.appendChild(img);
 
   if (isVideo) {
@@ -2164,10 +2180,7 @@ function renderEditPostMediaGrid() {
     box.className = 'edit-media-item';
 
     const img = document.createElement('img');
-    const thumbId = m.media_type === 'video' ? (m.thumb_file_id || m.drive_file_id) : m.drive_file_id;
-    img.src = getDriveThumbUrl(thumbId, 240);
-    img.loading = 'lazy';
-    img.alt = '縮圖';
+    setMediaThumbImage(img, m);
     box.appendChild(img);
 
     const moveBtn = document.createElement('button');
