@@ -936,7 +936,7 @@ function buildEventCardElement(ev, timelineMeta = null) {
 
   const shareBtn = document.createElement('button');
   shareBtn.type = 'button';
-  shareBtn.className = 'event-share-btn';
+  shareBtn.className = 'icon-btn share-btn';
   shareBtn.title = '分享行程卡片到 LINE';
   shareBtn.setAttribute('aria-label', '分享行程卡片到 LINE');
   shareBtn.innerHTML = '<i class="fa-regular fa-paper-plane"></i>';
